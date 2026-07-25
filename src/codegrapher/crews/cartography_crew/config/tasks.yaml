@@ -16,6 +16,7 @@ map_architecture_task:
     "## Entry Points" section listing every HTTP route found, its method,
     and the file that defines it.
   agent: cartographer
+  async_execution: true
 
 extract_schema_task:
   description: >
@@ -35,3 +36,17 @@ extract_schema_task:
     "## Mutation Paths" section listing, for each mutating route, the
     route, method, file, and the model(s) it writes to.
   agent: orm_schema_agent
+  async_execution: true
+
+join_reports_task:
+  description: >
+    You have been given two reports in your context: an architecture report
+    (from the Codebase Cartographer) and a schema report (from the Data &
+    ORM Schema Agent). Reproduce both reports verbatim, exactly as given -
+    do not summarize, rephrase, reformat, or add commentary of your own.
+    This task exists only to synchronize the two reports above, which were
+    produced in parallel; it adds no new analysis.
+  expected_output: >
+    The architecture report verbatim, then the schema report verbatim,
+    each under its own heading, with no other changes.
+  agent: cartographer
