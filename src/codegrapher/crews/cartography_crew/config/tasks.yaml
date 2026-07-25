@@ -1,0 +1,37 @@
+map_architecture_task:
+  description: >
+    Analyze the following parsed repository structure (JSON, produced by the
+    static AST parser - treat it as ground truth, not the raw source code):
+
+    {parsed_repo}
+
+    Identify the architectural layers present (e.g. API/routes layer,
+    service layer, data/ORM layer) and assign every file in the input to
+    exactly one layer. For each layer, list its files and one sentence on
+    its responsibility. Identify the system's entry points (the routes with
+    an http_method and route path).
+  expected_output: >
+    A markdown report with a "## Architectural Layers" section (one
+    subsection per layer, listing file paths and responsibility) and a
+    "## Entry Points" section listing every HTTP route found, its method,
+    and the file that defines it.
+  agent: cartographer
+
+extract_schema_task:
+  description: >
+    Analyze the following parsed repository structure (JSON, produced by the
+    static AST parser - treat it as ground truth, not the raw source code):
+
+    {parsed_repo}
+
+    Extract every ORM model (classes with is_orm_model: true). For each,
+    list its fields with types, mark primary keys and foreign keys, and
+    list its relationships including cascade behavior. Then, for every
+    function with a non-empty mutates_models list, record which model(s)
+    it mutates, its http_method + route, and the file it lives in.
+  expected_output: >
+    A markdown report with a "## ORM Models" section (one subsection per
+    model: fields table, primary/foreign keys, relationships) and a
+    "## Mutation Paths" section listing, for each mutating route, the
+    route, method, file, and the model(s) it writes to.
+  agent: orm_schema_agent

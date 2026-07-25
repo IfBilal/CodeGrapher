@@ -1,0 +1,37 @@
+generate_feature_stub_task:
+  description: >
+    A new feature has been requested for this repository:
+
+    "{feature_request}"
+
+    Here is the parsed repository structure (JSON, ground truth):
+
+    {parsed_repo}
+
+    Here are the reports already produced by earlier agents in the
+    pipeline - use them to match existing conventions and avoid repeating
+    known risks:
+
+    Architecture report:
+    {architecture_report}
+
+    Schema report:
+    {schema_report}
+
+    Anti-pattern report (avoid repeating any tight coupling or god-object
+    pattern flagged here):
+    {anti_pattern_report}
+
+    Write a Python code stub implementing the feature. It must follow the
+    same layering as the existing code (routes call services, services call
+    external APIs, routes mutate ORM models directly), match existing
+    field-naming and HTTP method conventions, and explicitly avoid any
+    anti-pattern flagged above. Do not invent framework details (e.g.
+    decorators, base classes) that are not implied by the existing
+    structural facts.
+  expected_output: >
+    A markdown response with a "## Code Stub" section containing the
+    Python code in a fenced code block, and a "## Contract Notes" section
+    listing, as bullet points, which existing conventions were matched and
+    which flagged risk(s) the stub deliberately avoids.
+  agent: feature_architect

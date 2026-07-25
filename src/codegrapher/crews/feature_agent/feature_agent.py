@@ -1,0 +1,54 @@
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import yaml
+from crewai import Agent, Task
+
+from codegrapher.llms import groq_llm
+
+if TYPE_CHECKING:
+    from codegrapher.flows.ingestion_flow import IngestionState
+
+_CONFIG_DIR = Path(__file__).parent / "config"
+
+
+def request_feature(feature_request: str, ingestion_state: "IngestionState") -> str:
+    """On-demand entry point: ask for a feature against an already-ingested repo.
+
+    This is the boundary between the ingestion Flow (auto-runs Cartography
+    then Impact analysis for every submitted repo) and this stage (runs
+    only when a user explicitly asks for a feature, possibly long after
+    ingestion finished, possibly never at all for a given repo). Takes the
+    finished IngestionState directly so callers don't need to know which
+    report field maps to which task placeholder.
+    """
+    return run_feature_architect(
+        {
+            "parsed_repo": ingestion_state.parsed_repo,
+            "feature_request": feature_request,
+            "architecture_report": ingestion_state.architecture_report,
+            "schema_report": ingestion_state.schema_report,
+            "anti_pattern_report": ingestion_state.anti_pattern_report,
+        }
+    )
+
+
+def run_feature_architect(inputs: dict[str, str]) -> str:
+    """Synthesis & Feature Architecture stage (PRD's "Sub-Crew 3").
+
+    Only one agent does real work here (the PRD's Sub-Crew 1 and 2 each
+    needed two agents cross-checking or building on each other; this stage
+    doesn't), so it's a plain Agent + Task, not a Crew. A Crew's job is
+    coordinating multiple agents through a process (sequential/hierarchical)
+    - with a single agent there's nothing to coordinate, so wrapping it in
+    one would just be indirection with no behavior behind it.
+    """
+    agents_config = yaml.safe_load((_CONFIG_DIR / "agents.yaml").read_text())
+    tasks_config = yaml.safe_load((_CONFIG_DIR / "tasks.yaml").read_text())
+
+    feature_architect = Agent(config=agents_config["feature_architect"], llm=groq_llm(), verbose=True)
+    task = Task(config=tasks_config["generate_feature_stub_task"], agent=feature_architect)
+    task.interpolate_inputs_and_add_conversation_history(inputs)
+
+    result = feature_architect.execute_task(task)
+    return result

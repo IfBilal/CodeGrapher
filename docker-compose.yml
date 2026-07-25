@@ -1,0 +1,44 @@
+services:
+  neo4j:
+    image: neo4j:5.18-community
+    container_name: codegrapher-neo4j
+    ports:
+      - "7474:7474" # HTTP browser UI
+      - "7687:7687" # Bolt protocol
+    environment:
+      NEO4J_AUTH: neo4j/codegrapher_dev
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - neo4j_data:/data
+
+  qdrant:
+    image: qdrant/qdrant:v1.8.4
+    container_name: codegrapher-qdrant
+    ports:
+      - "6333:6333" # REST
+      - "6334:6334" # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  postgres:
+    image: postgres:16
+    container_name: codegrapher-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: codegrapher
+      POSTGRES_PASSWORD: codegrapher_dev
+      POSTGRES_DB: codegrapher
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: codegrapher-redis
+    ports:
+      - "6379:6379"
+
+volumes:
+  neo4j_data:
+  qdrant_data:
+  postgres_data:

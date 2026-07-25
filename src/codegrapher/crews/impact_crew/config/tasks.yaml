@@ -1,0 +1,54 @@
+impact_analysis_task:
+  description: >
+    A proposed code edit is being considered for this repository:
+
+    "{proposed_edit}"
+
+    Here is the parsed repository structure (JSON, ground truth):
+
+    {parsed_repo}
+
+    Here is the architecture layer report already produced by the
+    Cartographer agent:
+
+    {architecture_report}
+
+    Starting from the edit target, trace outward up to 3 hops through
+    imports, function calls, and mutates_models edges present in the
+    parsed repository data. For each hop, list which files/functions/
+    models are reached and via which specific edge (e.g. "orders.py
+    calls billing.charge_card"). Rank the full set of impacted components
+    as HIGH / MEDIUM / LOW risk based on hop distance and whether the edge
+    is a data mutation.
+  expected_output: >
+    A markdown report with a "## Blast Radius" section listing every
+    impacted file/function/model, the hop count and edge chain that
+    reaches it, and a HIGH/MEDIUM/LOW risk rating with one sentence of
+    justification for each.
+  agent: impact_analysis_agent
+
+anti_pattern_task:
+  description: >
+    Here is the parsed repository structure (JSON, ground truth):
+
+    {parsed_repo}
+
+    Here are the architecture and schema reports already produced:
+
+    {architecture_report}
+
+    {schema_report}
+
+    Scan for: (1) circular import dependencies, (2) god objects - classes
+    or files with a disproportionate number of fields/functions/
+    responsibilities compared to the rest of the input, and (3) tight
+    coupling - functions that call into many unrelated modules directly.
+    For each finding, cite the exact files/classes/functions and edges
+    that constitute it. If a category has no findings in the provided
+    data, say so explicitly rather than omitting it.
+  expected_output: >
+    A markdown report with three sections - "## Circular Dependencies",
+    "## God Objects", "## Tight Coupling" - each either listing concrete
+    findings with cited evidence, or stating "No instances found in the
+    provided data."
+  agent: anti_pattern_agent
