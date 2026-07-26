@@ -12,7 +12,7 @@ services:
       - neo4j_data:/data
 
   qdrant:
-    image: qdrant/qdrant:v1.8.4
+    image: qdrant/qdrant:v1.12.4
     container_name: codegrapher-qdrant
     ports:
       - "6333:6333" # REST

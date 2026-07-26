@@ -5,7 +5,10 @@ description = "Autonomous codebase knowledge graph & impact analysis engine"
 requires-python = ">=3.11"
 dependencies = [
     "crewai[litellm]>=1.15.6",
+    "fastembed>=0.4.0",
+    "neo4j>=6.2.0",
     "python-dotenv>=1.2.2",
+    "qdrant-client>=1.18.0",
 ]
 
 [project.scripts]
