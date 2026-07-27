@@ -32,7 +32,7 @@ function MermaidDiagram({ chart }: { chart: string }) {
     };
   }, [chart]);
 
-  if (!svg) return <p className="text-sm text-zinc-500">Rendering diagram...</p>;
+  if (!svg) return <p className="text-sm text-ink-muted">Rendering diagram…</p>;
   // eslint-disable-next-line react/no-danger
   return <div dangerouslySetInnerHTML={{ __html: svg }} />;
 }
@@ -58,17 +58,101 @@ type CytoscapeElements = {
 };
 
 const NODE_COLORS: Record<string, string> = {
-  File: "#6b7280",
-  Class: "#2563eb",
-  Function: "#16a34a",
-  Field: "#9333ea",
-  ExternalSymbol: "#9ca3af",
-  ExternalService: "#dc2626",
+  File: "#8892a6",
+  Class: "#2f6fe0",
+  Function: "#1e8f79",
+  Field: "#8b5e34",
+  ExternalSymbol: "#b3bac9",
+  ExternalService: "#d1453a",
 };
+
+// ---- Small reusable pieces --------------------------------------------
+
+function Spinner({ className = "" }: { className?: string }) {
+  return (
+    <svg className={`spin ${className}`} width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="3" opacity="0.25" />
+      <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function Button({
+  children,
+  onClick,
+  disabled,
+  loading,
+  variant = "primary",
+  type = "button",
+}: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  loading?: boolean;
+  variant?: "primary" | "secondary";
+  type?: "button" | "submit";
+}) {
+  const base =
+    "inline-flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface";
+  const variants =
+    variant === "primary"
+      ? "bg-accent text-accent-ink hover:brightness-110 active:brightness-95"
+      : "bg-surface-2 text-ink border border-border hover:bg-border/60";
+  return (
+    <button type={type} className={`${base} ${variants}`} onClick={onClick} disabled={disabled || loading}>
+      {loading && <Spinner />}
+      {children}
+    </button>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-xs font-medium text-ink-muted uppercase tracking-wide">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+const inputClass =
+  "border border-border bg-surface text-ink placeholder:text-ink-muted/70 rounded-lg px-3.5 py-2.5 text-sm outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent/20";
+
+const STATUS_STYLES: Record<JobStatus["status"], { label: string; soft: string; solid: string; pulse?: boolean }> = {
+  pending: { label: "Pending", soft: "bg-warning-soft text-warning", solid: "bg-warning", pulse: true },
+  running: { label: "Running", soft: "bg-info-soft text-info", solid: "bg-info", pulse: true },
+  done: { label: "Done", soft: "bg-success-soft text-success", solid: "bg-success" },
+  failed: { label: "Failed", soft: "bg-danger-soft text-danger", solid: "bg-danger" },
+};
+
+function StatusPill({ status }: { status: JobStatus["status"] }) {
+  const s = STATUS_STYLES[status];
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${s.soft}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${s.solid} ${s.pulse ? "pulse" : ""}`} />
+      {s.label}
+    </span>
+  );
+}
+
+function Card({ title, icon, children }: { title: string; icon?: string; children: React.ReactNode }) {
+  return (
+    <section className="flex flex-col gap-4 rounded-xl border border-border bg-surface p-6 shadow-sm">
+      <h2 className="flex items-center gap-2 text-[15px] font-semibold text-ink">
+        {icon && <span aria-hidden="true">{icon}</span>}
+        {title}
+      </h2>
+      {children}
+    </section>
+  );
+}
+
+// ---- Page ---------------------------------------------------------------
 
 export default function Home() {
   const [repoPath, setRepoPath] = useState("");
   const [proposedEdit, setProposedEdit] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const [job, setJob] = useState<JobStatus | null>(null);
   const [graph, setGraph] = useState<CytoscapeElements | null>(null);
   const [featureRequest, setFeatureRequest] = useState("");
@@ -81,6 +165,7 @@ export default function Home() {
   const [logs, setLogs] = useState<{ message: string; ts: string }[]>([]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const logsEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     return () => {
@@ -88,6 +173,10 @@ export default function Home() {
       eventSourceRef.current?.close();
     };
   }, []);
+
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ block: "end" });
+  }, [logs]);
 
   function streamLogs(jobId: string) {
     eventSourceRef.current?.close();
@@ -101,10 +190,12 @@ export default function Home() {
   }
 
   async function submitRepo() {
+    setSubmitting(true);
     setSubmitError(null);
     setJob(null);
     setGraph(null);
     setFeatureStub(null);
+    setSequenceDiagram(null);
     setLogs([]);
 
     try {
@@ -121,10 +212,22 @@ export default function Home() {
         throw new Error(body.detail ?? `Request failed: ${res.status}`);
       }
       const { job_id } = await res.json();
+      setJob({
+        job_id,
+        repo_path: repoPath,
+        status: "pending",
+        error: null,
+        architecture_report: null,
+        schema_report: null,
+        impact_report: null,
+        anti_pattern_report: null,
+      });
       pollJob(job_id);
       streamLogs(job_id);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -176,114 +279,158 @@ export default function Home() {
     }
   }
 
+  const busy = job?.status === "pending" || job?.status === "running";
+
   const cyElements = graph
     ? [
         ...graph.elements.nodes.map((n) => ({
-          data: { ...n.data, color: NODE_COLORS[n.data.label] ?? "#6b7280" },
+          data: { ...n.data, color: NODE_COLORS[n.data.label] ?? "#8892a6" },
         })),
         ...graph.elements.edges,
       ]
     : [];
 
   return (
-    <div className="min-h-screen bg-zinc-50 dark:bg-black text-black dark:text-zinc-50 font-sans">
-      <main className="max-w-5xl mx-auto py-12 px-6 flex flex-col gap-8">
-        <h1 className="text-2xl font-semibold">CodeGrapher</h1>
+    <div className="min-h-screen bg-bg text-ink">
+      <main className="mx-auto flex max-w-5xl flex-col gap-6 px-6 py-12">
+        <header className="flex flex-col gap-1.5">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent text-accent-ink">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle cx="6" cy="6" r="3" fill="currentColor" />
+                <circle cx="18" cy="6" r="3" fill="currentColor" />
+                <circle cx="12" cy="18" r="3" fill="currentColor" />
+                <path d="M8.5 7.5 11 16M15.5 7.5 13 16M9 6h6" stroke="currentColor" strokeWidth="1.5" />
+              </svg>
+            </div>
+            <h1 className="text-xl font-semibold tracking-tight">CodeGrapher</h1>
+          </div>
+          <p className="text-sm text-ink-muted">Turn any repository into a queryable knowledge graph.</p>
+        </header>
 
-        <section className="flex flex-col gap-3 border border-zinc-200 dark:border-zinc-800 rounded-lg p-5">
-          <h2 className="font-medium">Submit a repo</h2>
-          <input
-            className="border border-zinc-300 dark:border-zinc-700 bg-transparent rounded px-3 py-2"
-            placeholder="Git URL (https://github.com/...) or an absolute local path"
-            value={repoPath}
-            onChange={(e) => setRepoPath(e.target.value)}
-          />
-          <input
-            className="border border-zinc-300 dark:border-zinc-700 bg-transparent rounded px-3 py-2"
-            placeholder="Proposed edit to analyze (optional)"
-            value={proposedEdit}
-            onChange={(e) => setProposedEdit(e.target.value)}
-          />
-          <button
-            className="self-start bg-black text-white dark:bg-white dark:text-black rounded px-4 py-2 disabled:opacity-50"
-            onClick={submitRepo}
-            disabled={!repoPath || job?.status === "pending" || job?.status === "running"}
-          >
-            Ingest repo
-          </button>
-          {submitError && <p className="text-red-600 text-sm">{submitError}</p>}
-          {job && (
-            <p className="text-sm text-zinc-600 dark:text-zinc-400">
-              Job {job.job_id.slice(0, 8)} — status: <strong>{job.status}</strong>
-              {job.error && ` — ${job.error}`}
-            </p>
+        <Card title="Submit a repo" icon="📦">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Repository">
+              <input
+                className={inputClass}
+                placeholder="Git URL or an absolute local path"
+                value={repoPath}
+                onChange={(e) => setRepoPath(e.target.value)}
+                disabled={submitting || busy}
+              />
+            </Field>
+            <Field label="Proposed edit (optional)">
+              <input
+                className={inputClass}
+                placeholder="What change should Impact Analysis evaluate?"
+                value={proposedEdit}
+                onChange={(e) => setProposedEdit(e.target.value)}
+                disabled={submitting || busy}
+              />
+            </Field>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <Button onClick={submitRepo} disabled={!repoPath || submitting || busy} loading={submitting}>
+              {submitting ? "Submitting…" : "Ingest repo"}
+            </Button>
+            {job && (
+              <div className="flex items-center gap-2 text-sm text-ink-muted">
+                <span className="font-mono text-xs">{job.job_id.slice(0, 8)}</span>
+                <StatusPill status={job.status} />
+              </div>
+            )}
+          </div>
+
+          {submitError && (
+            <p className="rounded-lg bg-danger-soft px-3 py-2 text-sm text-danger">{submitError}</p>
           )}
+          {job?.error && (
+            <p className="rounded-lg bg-danger-soft px-3 py-2 text-sm text-danger">{job.error}</p>
+          )}
+
           {logs.length > 0 && (
-            <div className="text-xs font-mono bg-zinc-900 text-zinc-200 rounded p-3 max-h-48 overflow-y-auto flex flex-col gap-1">
-              {logs.map((log, i) => (
-                <div key={i}>
-                  <span className="text-zinc-500">{new Date(log.ts).toLocaleTimeString()}</span> {log.message}
-                </div>
-              ))}
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center gap-1.5 text-xs font-medium text-ink-muted">
+                {busy && <span className="h-1.5 w-1.5 rounded-full bg-info pulse" />}
+                {busy ? "Live progress" : "Progress log"}
+              </div>
+              <div className="max-h-56 overflow-y-auto rounded-lg bg-[#0d1017] p-3 font-mono text-[12px] leading-relaxed text-zinc-300">
+                {logs.map((log, i) => (
+                  <div key={i} className="flex gap-2">
+                    <span className="shrink-0 text-zinc-500">{new Date(log.ts).toLocaleTimeString()}</span>
+                    <span>{log.message}</span>
+                  </div>
+                ))}
+                <div ref={logsEndRef} />
+              </div>
             </div>
           )}
-        </section>
+        </Card>
 
         {job?.status === "done" && (
           <>
-            <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <ReportCard title="Architecture" text={job.architecture_report} />
-              <ReportCard title="Schema" text={job.schema_report} />
-              <ReportCard title="Impact / Blast Radius" text={job.impact_report} />
-              <ReportCard title="Anti-Patterns" text={job.anti_pattern_report} />
-            </section>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <ReportCard title="Architecture" icon="🗺️" text={job.architecture_report} />
+              <ReportCard title="Schema" icon="🗄️" text={job.schema_report} />
+              <ReportCard title="Impact / Blast Radius" icon="💥" text={job.impact_report} />
+              <ReportCard title="Anti-Patterns" icon="⚠️" text={job.anti_pattern_report} />
+            </div>
 
-            <section className="border border-zinc-200 dark:border-zinc-800 rounded-lg p-5">
-              <h2 className="font-medium mb-3">Graph ({graph?.elements.nodes.length ?? 0} nodes)</h2>
+            <Card title={`Graph — ${graph?.elements.nodes.length ?? 0} nodes`} icon="🕸️">
+              <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                {Object.entries(NODE_COLORS).map(([label, color]) => (
+                  <span key={label} className="flex items-center gap-1.5 text-xs text-ink-muted">
+                    <span className="h-2.5 w-2.5 rounded-full" style={{ background: color }} />
+                    {label}
+                  </span>
+                ))}
+              </div>
               {graph && (
-                <CytoscapeComponent
-                  elements={cyElements}
-                  style={{ width: "100%", height: "500px" }}
-                  layout={{ name: "cose", animate: false }}
-                  stylesheet={[
-                    {
-                      selector: "node",
-                      style: {
-                        "background-color": "data(color)",
-                        label: "data(name)",
-                        "font-size": "8px",
-                        color: "#666",
-                        "text-valign": "bottom",
-                        width: 16,
-                        height: 16,
+                <div className="overflow-hidden rounded-lg border border-border">
+                  <CytoscapeComponent
+                    elements={cyElements}
+                    style={{ width: "100%", height: "480px" }}
+                    layout={{ name: "cose", animate: false }}
+                    stylesheet={[
+                      {
+                        selector: "node",
+                        style: {
+                          "background-color": "data(color)",
+                          label: "data(name)",
+                          "font-size": "8px",
+                          color: "#888",
+                          "text-valign": "bottom",
+                          width: 16,
+                          height: 16,
+                        },
                       },
-                    },
-                    {
-                      selector: "edge",
-                      style: {
-                        width: 1,
-                        "line-color": "#ccc",
-                        "target-arrow-color": "#ccc",
-                        "target-arrow-shape": "triangle",
-                        "curve-style": "bezier",
-                        label: "data(label)",
-                        "font-size": "6px",
+                      {
+                        selector: "edge",
+                        style: {
+                          width: 1,
+                          "line-color": "#c7cddb",
+                          "target-arrow-color": "#c7cddb",
+                          "target-arrow-shape": "triangle",
+                          "curve-style": "bezier",
+                          label: "data(label)",
+                          "font-size": "6px",
+                        },
                       },
-                    },
-                  ]}
-                />
+                    ]}
+                  />
+                </div>
               )}
-            </section>
+            </Card>
 
-            <section className="flex flex-col gap-3 border border-zinc-200 dark:border-zinc-800 rounded-lg p-5">
-              <h2 className="font-medium">Call sequence diagram</h2>
-              <div className="flex gap-2">
+            <Card title="Call sequence diagram" icon="🔀">
+              <div className="flex flex-col gap-3 sm:flex-row">
                 <select
-                  className="border border-zinc-300 dark:border-zinc-700 bg-transparent rounded px-3 py-2 flex-1"
+                  className={`${inputClass} flex-1`}
                   value={selectedFunction}
                   onChange={(e) => setSelectedFunction(e.target.value)}
                 >
-                  <option value="">Select a function...</option>
+                  <option value="">Select a function…</option>
                   {graph?.elements.nodes
                     .filter((n) => n.data.label === "Function")
                     .map((n) => (
@@ -292,44 +439,46 @@ export default function Home() {
                       </option>
                     ))}
                 </select>
-                <button
-                  className="bg-black text-white dark:bg-white dark:text-black rounded px-4 py-2 disabled:opacity-50"
+                <Button
+                  variant="secondary"
                   onClick={loadSequenceDiagram}
                   disabled={!selectedFunction || sequenceLoading}
+                  loading={sequenceLoading}
                 >
-                  {sequenceLoading ? "Loading..." : "Show diagram"}
-                </button>
+                  {sequenceLoading ? "Loading…" : "Show diagram"}
+                </Button>
               </div>
               {sequenceDiagram && (
-                <div className="bg-white dark:bg-zinc-900 rounded p-3 overflow-x-auto">
+                <div className="overflow-x-auto rounded-lg border border-border bg-white p-3">
                   <MermaidDiagram chart={sequenceDiagram} />
                 </div>
               )}
-            </section>
+            </Card>
 
-            <section className="flex flex-col gap-3 border border-zinc-200 dark:border-zinc-800 rounded-lg p-5">
-              <h2 className="font-medium">Request a feature</h2>
-              <textarea
-                className="border border-zinc-300 dark:border-zinc-700 bg-transparent rounded px-3 py-2"
-                rows={3}
-                placeholder="e.g. Add a refund_order feature..."
-                value={featureRequest}
-                onChange={(e) => setFeatureRequest(e.target.value)}
-              />
-              <button
-                className="self-start bg-black text-white dark:bg-white dark:text-black rounded px-4 py-2 disabled:opacity-50"
+            <Card title="Request a feature" icon="✨">
+              <Field label="Describe the feature">
+                <textarea
+                  className={inputClass}
+                  rows={3}
+                  placeholder="e.g. Add a refund_order feature…"
+                  value={featureRequest}
+                  onChange={(e) => setFeatureRequest(e.target.value)}
+                />
+              </Field>
+              <Button
                 onClick={submitFeatureRequest}
                 disabled={!featureRequest || featureLoading}
+                loading={featureLoading}
               >
-                {featureLoading ? "Generating..." : "Generate stub"}
-              </button>
+                {featureLoading ? "Generating…" : "Generate stub"}
+              </Button>
               {featureStub &&
                 (() => {
                   const { code, rest } = splitFeatureStub(featureStub);
                   return (
-                    <>
+                    <div className="flex flex-col gap-3">
                       {code && (
-                        <div className="border border-zinc-300 dark:border-zinc-700 rounded overflow-hidden">
+                        <div className="overflow-hidden rounded-lg border border-border">
                           <MonacoEditor
                             height="320px"
                             defaultLanguage="python"
@@ -339,13 +488,13 @@ export default function Home() {
                           />
                         </div>
                       )}
-                      <pre className="whitespace-pre-wrap text-sm bg-zinc-100 dark:bg-zinc-900 rounded p-3 overflow-x-auto">
+                      <pre className="whitespace-pre-wrap rounded-lg bg-surface-2 p-3.5 text-sm text-ink">
                         {rest}
                       </pre>
-                    </>
+                    </div>
                   );
                 })()}
-            </section>
+            </Card>
           </>
         )}
       </main>
@@ -353,11 +502,14 @@ export default function Home() {
   );
 }
 
-function ReportCard({ title, text }: { title: string; text: string | null }) {
+function ReportCard({ title, icon, text }: { title: string; icon: string; text: string | null }) {
   return (
-    <div className="border border-zinc-200 dark:border-zinc-800 rounded-lg p-4">
-      <h3 className="font-medium mb-2">{title}</h3>
-      <pre className="whitespace-pre-wrap text-xs text-zinc-700 dark:text-zinc-300 max-h-64 overflow-y-auto">
+    <div className="flex flex-col gap-2.5 rounded-xl border border-border bg-surface p-5 shadow-sm">
+      <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
+        <span aria-hidden="true">{icon}</span>
+        {title}
+      </h3>
+      <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed text-ink-muted">
         {text}
       </pre>
     </div>
