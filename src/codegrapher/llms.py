@@ -7,6 +7,7 @@ from crewai import LLM
 from litellm.exceptions import RateLimitError
 
 _MAX_RATE_LIMIT_RETRIES = 4
+_MAX_AUTO_RETRY_WAIT_S = 60  # don't auto-sleep through anything longer than this
 
 
 class GroqLLM(LLM):
@@ -25,8 +26,15 @@ class GroqLLM(LLM):
     pipeline fires several calls in quick succession, and Groq's free tier
     (12k TPM) is easy to exceed within one rolling minute even when each
     individual call is well within limits. Groq's error message includes
-    the exact wait time ("Please try again in 8.3s") - we parse and honor
-    that instead of guessing a backoff.
+    the exact wait time ("Please try again in 8.3s", or "20m13.92s" for a
+    longer wait) - we parse and honor that instead of guessing a backoff.
+
+    Only short waits are retried automatically (see _MAX_AUTO_RETRY_WAIT_S).
+    A per-minute limit clearing in a few seconds is worth sleeping through;
+    a daily-quota exhaustion telling us to wait 20+ minutes is not - eating
+    that wait inside a synchronous call would hang a Celery worker for the
+    duration. Past that threshold we raise immediately so the job fails
+    fast and visibly instead of silently stalling.
     """
 
     def _handle_non_streaming_response(
@@ -39,15 +47,19 @@ class GroqLLM(LLM):
             try:
                 return super()._handle_non_streaming_response(params, *args, **kwargs)
             except RateLimitError as exc:
-                if attempt == _MAX_RATE_LIMIT_RETRIES:
+                wait_seconds = _parse_retry_after(str(exc))
+                if attempt == _MAX_RATE_LIMIT_RETRIES or wait_seconds is None or wait_seconds > _MAX_AUTO_RETRY_WAIT_S:
                     raise
-                wait_seconds = _parse_retry_after(str(exc)) or 10
                 time.sleep(wait_seconds)
 
 
 def _parse_retry_after(error_message: str) -> float | None:
-    match = re.search(r"try again in ([\d.]+)s", error_message)
-    return float(match.group(1)) + 1 if match else None
+    match = re.search(r"try again in (?:(\d+)m)?([\d.]+)s", error_message)
+    if not match:
+        return None
+    minutes = int(match.group(1)) if match.group(1) else 0
+    seconds = float(match.group(2))
+    return minutes * 60 + seconds + 1
 
 
 def groq_llm(model: str = "llama-3.3-70b-versatile", temperature: float = 0.2) -> GroqLLM:

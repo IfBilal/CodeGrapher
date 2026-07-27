@@ -4,6 +4,38 @@ import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 
 const CytoscapeComponent = dynamic(() => import("react-cytoscapejs"), { ssr: false });
+const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
+
+// The Feature Architect's response is markdown with a fenced code block
+// (the actual stub) followed by prose (contract notes). Split them so the
+// code renders in Monaco - with real syntax highlighting - instead of a
+// flat <pre> block, and the prose stays as plain text underneath.
+function splitFeatureStub(markdown: string): { code: string | null; rest: string } {
+  const match = markdown.match(/```(?:python)?\n([\s\S]*?)```/);
+  if (!match) return { code: null, rest: markdown };
+  return { code: match[1].trimEnd(), rest: markdown.slice(match.index! + match[0].length).trim() };
+}
+
+function MermaidDiagram({ chart }: { chart: string }) {
+  const [svg, setSvg] = useState<string | null>(null);
+  const idRef = useRef(`mermaid-${Math.random().toString(36).slice(2)}`);
+
+  useEffect(() => {
+    let cancelled = false;
+    import("mermaid").then(async ({ default: mermaid }) => {
+      mermaid.initialize({ startOnLoad: false, theme: "neutral" });
+      const { svg } = await mermaid.render(idRef.current, chart);
+      if (!cancelled) setSvg(svg);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [chart]);
+
+  if (!svg) return <p className="text-sm text-zinc-500">Rendering diagram...</p>;
+  // eslint-disable-next-line react/no-danger
+  return <div dangerouslySetInnerHTML={{ __html: svg }} />;
+}
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -43,19 +75,37 @@ export default function Home() {
   const [featureStub, setFeatureStub] = useState<string | null>(null);
   const [featureLoading, setFeatureLoading] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [selectedFunction, setSelectedFunction] = useState("");
+  const [sequenceDiagram, setSequenceDiagram] = useState<string | null>(null);
+  const [sequenceLoading, setSequenceLoading] = useState(false);
+  const [logs, setLogs] = useState<{ message: string; ts: string }[]>([]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
+      eventSourceRef.current?.close();
     };
   }, []);
+
+  function streamLogs(jobId: string) {
+    eventSourceRef.current?.close();
+    const es = new EventSource(`${API_URL}/repos/${jobId}/events`);
+    es.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+      setLogs((prev) => [...prev, data]);
+    };
+    es.onerror = () => es.close();
+    eventSourceRef.current = es;
+  }
 
   async function submitRepo() {
     setSubmitError(null);
     setJob(null);
     setGraph(null);
     setFeatureStub(null);
+    setLogs([]);
 
     try {
       const res = await fetch(`${API_URL}/repos`, {
@@ -72,6 +122,7 @@ export default function Home() {
       }
       const { job_id } = await res.json();
       pollJob(job_id);
+      streamLogs(job_id);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : String(err));
     }
@@ -93,6 +144,19 @@ export default function Home() {
   async function loadGraph(jobId: string) {
     const res = await fetch(`${API_URL}/repos/${jobId}/graph`);
     setGraph(await res.json());
+  }
+
+  async function loadSequenceDiagram() {
+    if (!job || !selectedFunction) return;
+    setSequenceLoading(true);
+    setSequenceDiagram(null);
+    try {
+      const res = await fetch(`${API_URL}/repos/${job.job_id}/sequence/${encodeURIComponent(selectedFunction)}`);
+      const data = await res.json();
+      setSequenceDiagram(data.mermaid ?? null);
+    } finally {
+      setSequenceLoading(false);
+    }
   }
 
   async function submitFeatureRequest() {
@@ -130,7 +194,7 @@ export default function Home() {
           <h2 className="font-medium">Submit a repo</h2>
           <input
             className="border border-zinc-300 dark:border-zinc-700 bg-transparent rounded px-3 py-2"
-            placeholder="Absolute path to a local repo, e.g. /home/you/project"
+            placeholder="Git URL (https://github.com/...) or an absolute local path"
             value={repoPath}
             onChange={(e) => setRepoPath(e.target.value)}
           />
@@ -153,6 +217,15 @@ export default function Home() {
               Job {job.job_id.slice(0, 8)} — status: <strong>{job.status}</strong>
               {job.error && ` — ${job.error}`}
             </p>
+          )}
+          {logs.length > 0 && (
+            <div className="text-xs font-mono bg-zinc-900 text-zinc-200 rounded p-3 max-h-48 overflow-y-auto flex flex-col gap-1">
+              {logs.map((log, i) => (
+                <div key={i}>
+                  <span className="text-zinc-500">{new Date(log.ts).toLocaleTimeString()}</span> {log.message}
+                </div>
+              ))}
+            </div>
           )}
         </section>
 
@@ -203,6 +276,38 @@ export default function Home() {
             </section>
 
             <section className="flex flex-col gap-3 border border-zinc-200 dark:border-zinc-800 rounded-lg p-5">
+              <h2 className="font-medium">Call sequence diagram</h2>
+              <div className="flex gap-2">
+                <select
+                  className="border border-zinc-300 dark:border-zinc-700 bg-transparent rounded px-3 py-2 flex-1"
+                  value={selectedFunction}
+                  onChange={(e) => setSelectedFunction(e.target.value)}
+                >
+                  <option value="">Select a function...</option>
+                  {graph?.elements.nodes
+                    .filter((n) => n.data.label === "Function")
+                    .map((n) => (
+                      <option key={n.data.id} value={n.data.name}>
+                        {n.data.name}
+                      </option>
+                    ))}
+                </select>
+                <button
+                  className="bg-black text-white dark:bg-white dark:text-black rounded px-4 py-2 disabled:opacity-50"
+                  onClick={loadSequenceDiagram}
+                  disabled={!selectedFunction || sequenceLoading}
+                >
+                  {sequenceLoading ? "Loading..." : "Show diagram"}
+                </button>
+              </div>
+              {sequenceDiagram && (
+                <div className="bg-white dark:bg-zinc-900 rounded p-3 overflow-x-auto">
+                  <MermaidDiagram chart={sequenceDiagram} />
+                </div>
+              )}
+            </section>
+
+            <section className="flex flex-col gap-3 border border-zinc-200 dark:border-zinc-800 rounded-lg p-5">
               <h2 className="font-medium">Request a feature</h2>
               <textarea
                 className="border border-zinc-300 dark:border-zinc-700 bg-transparent rounded px-3 py-2"
@@ -218,11 +323,28 @@ export default function Home() {
               >
                 {featureLoading ? "Generating..." : "Generate stub"}
               </button>
-              {featureStub && (
-                <pre className="whitespace-pre-wrap text-sm bg-zinc-100 dark:bg-zinc-900 rounded p-3 overflow-x-auto">
-                  {featureStub}
-                </pre>
-              )}
+              {featureStub &&
+                (() => {
+                  const { code, rest } = splitFeatureStub(featureStub);
+                  return (
+                    <>
+                      {code && (
+                        <div className="border border-zinc-300 dark:border-zinc-700 rounded overflow-hidden">
+                          <MonacoEditor
+                            height="320px"
+                            defaultLanguage="python"
+                            value={code}
+                            theme="vs-dark"
+                            options={{ readOnly: true, minimap: { enabled: false }, fontSize: 13 }}
+                          />
+                        </div>
+                      )}
+                      <pre className="whitespace-pre-wrap text-sm bg-zinc-100 dark:bg-zinc-900 rounded p-3 overflow-x-auto">
+                        {rest}
+                      </pre>
+                    </>
+                  );
+                })()}
             </section>
           </>
         )}

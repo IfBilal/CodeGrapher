@@ -1,5 +1,12 @@
 """Node 1: deterministic AST parser.
 
+parse_repo() is the single entry point for the whole repo, regardless of
+language - it handles .py files directly (this module) and delegates
+.js/.jsx/.ts/.tsx files to js_ts_parser.py (a separate Tree-Sitter based
+parser, since Python's own `ast` module only understands Python syntax),
+merging both into one file list under one repo_name. See js_ts_parser.py's
+own docstring for what's deliberately out of scope on the JS/TS side.
+
 Walks a repo's .py files and extracts the same structural JSON shape that
 sample_data/sample_parsed_repo.json hand-wrote as a stand-in - so this is
 literally the thing that mock was standing in for. No LLM calls anywhere in
@@ -32,6 +39,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from codegrapher.parser.frameworks import ORM_PROFILES
+from codegrapher.parser.js_ts_parser import parse_js_ts_files
 
 _HTTP_DECORATOR_METHODS = {"get", "post", "put", "delete", "patch"}
 _MUTATING_SESSION_METHODS = {"add", "delete"}
@@ -58,6 +66,12 @@ def parse_repo(repo_root: Path) -> dict:
     model_class_names = _collect_model_class_names(file_trees)
     mutating_params = _collect_mutating_param_positions(file_trees)
     files = [_parse_file(rel_path, tree, model_class_names, mutating_params) for rel_path, tree in file_trees.items()]
+
+    # JS/TS files go through a separate Tree-Sitter based parser
+    # (js_ts_parser.py) - different grammar, different library - but
+    # produce the same file-dict shape, so they just get appended to the
+    # same list with no further merging logic needed.
+    files.extend(parse_js_ts_files(repo_root))
 
     return {"repo_name": repo_root.name, "files": files}
 
