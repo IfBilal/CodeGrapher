@@ -26,8 +26,10 @@ class GroqLLM(LLM):
     pipeline fires several calls in quick succession, and Groq's free tier
     (12k TPM) is easy to exceed within one rolling minute even when each
     individual call is well within limits. Groq's error message includes
-    the exact wait time ("Please try again in 8.3s", or "20m13.92s" for a
-    longer wait) - we parse and honor that instead of guessing a backoff.
+    the exact wait time - seconds ("8.3s"), minutes+seconds ("20m13.92s"),
+    or, when the limit clears almost immediately, milliseconds ("215ms") -
+    we parse and honor whichever form shows up instead of guessing a
+    backoff.
 
     Only short waits are retried automatically (see _MAX_AUTO_RETRY_WAIT_S).
     A per-minute limit clearing in a few seconds is worth sleeping through;
@@ -54,7 +56,11 @@ class GroqLLM(LLM):
 
 
 def _parse_retry_after(error_message: str) -> float | None:
-    match = re.search(r"try again in (?:(\d+)m)?([\d.]+)s", error_message)
+    ms_match = re.search(r"try again in ([\d.]+)ms\b", error_message)
+    if ms_match:
+        return float(ms_match.group(1)) / 1000 + 0.5
+
+    match = re.search(r"try again in (?:(\d+)m)?([\d.]+)s\b", error_message)
     if not match:
         return None
     minutes = int(match.group(1)) if match.group(1) else 0
