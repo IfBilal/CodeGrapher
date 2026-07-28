@@ -11,11 +11,13 @@ from codegrapher.api.db import Base
 class IngestionJob(Base):
     """One row per repo submitted for ingestion. Status moves
     pending -> running -> done (or failed), updated by the Celery task as
-    it progresses through Node 1 -> Node 2 -> the Cartography/Impact Flow.
-    Report columns stay NULL until the Flow actually produces them, so a
-    client polling status can distinguish "still running" from "done but
-    a report was empty" (shouldn't happen, but NULL vs "" makes the
-    difference unambiguous instead of guessed from an empty string).
+    it progresses through Node 1 -> Node 2 -> IngestionCrew. Report columns
+    stay NULL until the crew actually produces them, so a client polling
+    status can distinguish "still running" from "done but a report was
+    empty" (shouldn't happen, but NULL vs "" makes the difference
+    unambiguous instead of guessed from an empty string). impact_report
+    stays NULL until the separate, on-demand ImpactCrew run happens, which
+    may be much later or never.
     """
 
     __tablename__ = "ingestion_jobs"

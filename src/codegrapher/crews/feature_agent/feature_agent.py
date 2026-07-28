@@ -1,5 +1,7 @@
 from pathlib import Path
 from typing import TYPE_CHECKING
+import json
+from collections import Counter
 
 import yaml
 from crewai import Agent, Task
@@ -7,7 +9,7 @@ from crewai import Agent, Task
 from codegrapher.llms import groq_llm
 
 if TYPE_CHECKING:
-    from codegrapher.flows.ingestion_flow import IngestionState
+    from codegrapher.ingestion_state import IngestionState
 
 _CONFIG_DIR = Path(__file__).parent / "config"
 
@@ -15,22 +17,33 @@ _CONFIG_DIR = Path(__file__).parent / "config"
 def request_feature(feature_request: str, ingestion_state: "IngestionState") -> str:
     """On-demand entry point: ask for a feature against an already-ingested repo.
 
-    This is the boundary between the ingestion Flow (auto-runs Cartography
-    then Impact analysis for every submitted repo) and this stage (runs
-    only when a user explicitly asks for a feature, possibly long after
-    ingestion finished, possibly never at all for a given repo). Takes the
-    finished IngestionState directly so callers don't need to know which
-    report field maps to which task placeholder.
+    This is the boundary between IngestionCrew (auto-runs Cartography and
+    Anti-Pattern for every submitted repo) and this stage (runs only when a
+    user explicitly asks for a feature, possibly long after ingestion
+    finished, possibly never at all for a given repo). Impact Analysis is
+    neither of these - it's ImpactCrew, a third, separate on-demand crew.
+    Takes the finished IngestionState directly so callers don't need to
+    know which report field maps to which task placeholder.
     """
     return run_feature_architect(
         {
             "parsed_repo": ingestion_state.parsed_repo,
             "feature_request": feature_request,
+            "primary_language": detect_primary_language(ingestion_state.parsed_repo),
             "architecture_report": ingestion_state.architecture_report,
             "schema_report": ingestion_state.schema_report,
             "anti_pattern_report": ingestion_state.anti_pattern_report,
         }
     )
+
+
+def detect_primary_language(parsed_repo: str) -> str:
+    try:
+        parsed_files = json.loads(parsed_repo).get("files", [])
+        languages = Counter(file.get("language") for file in parsed_files if file.get("language"))
+        return languages.most_common(1)[0][0] if languages else "the repository's primary language"
+    except (json.JSONDecodeError, TypeError, IndexError):
+        return "the repository's primary language"
 
 
 def run_feature_architect(inputs: dict[str, str]) -> str:
@@ -43,6 +56,10 @@ def run_feature_architect(inputs: dict[str, str]) -> str:
     - with a single agent there's nothing to coordinate, so wrapping it in
     one would just be indirection with no behavior behind it.
     """
+    # Keep direct callers and long-lived API processes compatible whenever
+    # the task prompt grows a new required interpolation variable.
+    inputs.setdefault("primary_language", detect_primary_language(inputs.get("parsed_repo", "")))
+
     agents_config = yaml.safe_load((_CONFIG_DIR / "agents.yaml").read_text())
     tasks_config = yaml.safe_load((_CONFIG_DIR / "tasks.yaml").read_text())
 

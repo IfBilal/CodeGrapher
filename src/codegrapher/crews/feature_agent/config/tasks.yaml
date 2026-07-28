@@ -22,16 +22,20 @@ generate_feature_stub_task:
     pattern flagged here):
     {anti_pattern_report}
 
-    Write a Python code stub implementing the feature. It must follow the
-    same layering as the existing code (routes call services, services call
-    external APIs, routes mutate ORM models directly), match existing
-    field-naming and HTTP method conventions, and explicitly avoid any
-    anti-pattern flagged above. Do not invent framework details (e.g.
-    decorators, base classes) that are not implied by the existing
-    structural facts.
+    The detected primary language is: {primary_language}.
+
+    Write a code stub in that language only. For a TypeScript repository,
+    emit TypeScript/TSX using the repository's actual file conventions;
+    never emit Python, FastAPI, Pydantic, or ORM code unless those facts
+    appear in the parsed repository. Follow existing layering and naming
+    conventions only when they are evidenced in the structural facts. Do
+    not invent framework details, routes, base classes, or persistence
+    layers that are not implied by those facts. Explicitly avoid any
+    anti-pattern flagged above.
   expected_output: >
     A markdown response with a "## Code Stub" section containing the
-    Python code in a fenced code block, and a "## Contract Notes" section
+    code in a fenced block labelled with the detected language (for example
+    ```typescript), and a "## Contract Notes" section
     listing, as bullet points, which existing conventions were matched and
     which flagged risk(s) the stub deliberately avoids.
   agent: feature_architect

@@ -7,9 +7,8 @@ parser, since Python's own `ast` module only understands Python syntax),
 merging both into one file list under one repo_name. See js_ts_parser.py's
 own docstring for what's deliberately out of scope on the JS/TS side.
 
-Walks a repo's .py files and extracts the same structural JSON shape that
-sample_data/sample_parsed_repo.json hand-wrote as a stand-in - so this is
-literally the thing that mock was standing in for. No LLM calls anywhere in
+Walks a repo's .py files and extracts a structural JSON shape (files,
+functions, classes, calls, imports). No LLM calls anywhere in
 this file; every fact extracted here comes from Python's own `ast` module
 inspecting fixed language grammar (function defs, class defs, calls,
 imports), never from guessing what the code "means".

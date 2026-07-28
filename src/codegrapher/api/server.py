@@ -17,9 +17,9 @@ from codegrapher.api.models import IngestionJob
 from codegrapher.api.progress import read_events
 from codegrapher.api.repo_source import derive_repo_name, is_git_url
 from codegrapher.api.sequence_diagram import get_call_sequence_diagram
-from codegrapher.api.tasks import run_ingestion
+from codegrapher.api.tasks import run_impact_analysis, run_ingestion
 from codegrapher.crews.feature_agent.feature_agent import request_feature
-from codegrapher.flows.ingestion_flow import IngestionState
+from codegrapher.ingestion_state import IngestionState
 
 load_dotenv()
 
@@ -41,7 +41,6 @@ class SubmitRepoRequest(BaseModel):
     # Either a git URL (http(s):// or ending in .git - shallow-cloned to a
     # temp dir and cleaned up after ingestion) or an already-local path.
     repo_path: str
-    proposed_edit: str = "General review: identify any changes across the codebase's mutation paths and risk areas."
 
 
 class SubmitRepoResponse(BaseModel):
@@ -63,6 +62,10 @@ class FeatureRequest(BaseModel):
     feature_request: str
 
 
+class ImpactRequest(BaseModel):
+    proposed_edit: str
+
+
 @app.post("/repos", response_model=SubmitRepoResponse)
 async def submit_repo(body: SubmitRepoRequest) -> SubmitRepoResponse:
     if not is_git_url(body.repo_path) and not Path(body.repo_path).is_dir():
@@ -74,7 +77,7 @@ async def submit_repo(body: SubmitRepoRequest) -> SubmitRepoResponse:
         await session.commit()
         await session.refresh(job)
 
-    run_ingestion.delay(str(job.id), body.repo_path, body.proposed_edit)
+    run_ingestion.delay(str(job.id), body.repo_path)
     return SubmitRepoResponse(job_id=job.id)
 
 
@@ -91,6 +94,26 @@ async def get_job(job_id: uuid.UUID) -> JobStatusResponse:
         impact_report=job.impact_report,
         anti_pattern_report=job.anti_pattern_report,
     )
+
+
+@app.post("/repos/{job_id}/impact")
+async def assess_impact(job_id: uuid.UUID, body: ImpactRequest) -> dict:
+    job = await _get_job_or_404(job_id)
+    if job.status != "done" or not job.parsed_repo_json:
+        raise HTTPException(status_code=409, detail="Repository ingestion must finish before impact analysis can run")
+    if not body.proposed_edit.strip():
+        raise HTTPException(status_code=422, detail="Describe a proposed edit before running impact analysis")
+
+    # Clear a previous result so the client can wait for this new request.
+    async with SessionLocal() as session:
+        stored_job = await session.get(IngestionJob, job_id)
+        assert stored_job is not None
+        stored_job.impact_report = None
+        stored_job.error = None
+        await session.commit()
+
+    run_impact_analysis.delay(str(job_id), body.proposed_edit.strip())
+    return {"status": "queued"}
 
 
 @app.get("/repos/{job_id}/events")
@@ -165,7 +188,10 @@ async def submit_feature_request(job_id: uuid.UUID, body: FeatureRequest) -> dic
     # request_feature runs CrewAI synchronously, which can't execute inside
     # an already-running asyncio event loop (this endpoint's own loop) -
     # push it onto a separate thread instead of calling it directly.
-    stub = await asyncio.to_thread(request_feature, body.feature_request, ingestion_state)
+    try:
+        stub = await asyncio.to_thread(request_feature, body.feature_request, ingestion_state)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Feature generation failed: {exc}") from exc
     return {"feature_stub": stub}
 
 

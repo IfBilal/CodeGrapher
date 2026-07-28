@@ -6,13 +6,16 @@ from codegrapher.llms import groq_llm
 
 @CrewBase
 class ImpactCrew:
-    """Sub-Crew 2: Graph Traversal & Risk Analysis.
+    """The on-demand impact-analysis crew: Impact Analysis + Anti-Pattern.
 
-    Consumes the parsed repo JSON plus Sub-Crew 1's architecture and schema
-    reports (passed in as plain-text inputs - these crews aren't chained via
-    CrewAI's intra-crew `context`, since they're separate Crew objects; the
-    caller is responsible for feeding one crew's output into the next one's
-    inputs, which is exactly what a Flow will formalize in a later phase).
+    Triggered separately from IngestionCrew, any time after ingestion (or
+    never) via POST /repos/{job_id}/impact - never as part of the automatic
+    ingestion sequence. Consumes the parsed repo JSON plus the architecture
+    and schema reports produced by the original IngestionCrew run, passed
+    in as plain-text inputs read back out of Postgres. This crew starts
+    cold, with no in-memory context from that earlier run, so it can't use
+    CrewAI's automatic sequential context-passing the way IngestionCrew's
+    own tasks can - the caller has to feed the reports in explicitly.
     """
 
     agents_config = "config/agents.yaml"

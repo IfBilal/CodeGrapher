@@ -1,6 +1,6 @@
 impact_analysis_task:
   description: >
-    A proposed code edit is being considered for this repository:
+    A proposed code edit may be supplied for this repository:
 
     "{proposed_edit}"
 
@@ -13,7 +13,10 @@ impact_analysis_task:
 
     {architecture_report}
 
-    Starting from the edit target, trace outward up to 3 hops through
+    If the proposed edit is empty or whitespace, do not infer or select an
+    edit target. Return only a concise "## Blast Radius" section saying
+    "No proposed edit was supplied, so no blast-radius assessment was run."
+    Otherwise, starting from the edit target, trace outward up to 3 hops through
     imports, function calls, and mutates_models edges present in the
     parsed repository data. For each hop, list which files/functions/
     models are reached and via which specific edge (e.g. "orders.py
@@ -21,7 +24,8 @@ impact_analysis_task:
     as HIGH / MEDIUM / LOW risk based on hop distance and whether the edge
     is a data mutation.
   expected_output: >
-    A markdown report with a "## Blast Radius" section listing every
+    If no edit was supplied, exactly the concise no-assessment message above.
+    Otherwise, a markdown report with a "## Blast Radius" section listing every
     impacted file/function/model, the hop count and edge chain that
     reaches it, and a HIGH/MEDIUM/LOW risk rating with one sentence of
     justification for each.

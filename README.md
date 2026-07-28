@@ -27,8 +27,9 @@ No part of the *extraction* is AI-guessed. Only the *reasoning* is.
 1. **You give it a repo** — a git URL or a local path.
 2. **Node 1** parses it with zero AI: Python's own `ast` module for `.py` files, Tree-Sitter for `.js/.jsx/.ts/.tsx`. Every extracted fact traces back to a specific line of source.
 3. **Node 2** pushes those facts into **Neo4j** (files/classes/functions/relationships as real graph nodes and edges) and **Qdrant** (meaning-searchable embeddings of each symbol).
-4. **A CrewAI multi-agent Flow** runs two sub-crews in sequence — one maps the architecture and schema, the next traces impact/risk and anti-patterns — then a third, on-demand agent drafts feature stubs matching the codebase's existing conventions.
-5. **The frontend** shows it all: live agent progress over SSE, the four analysis reports, an interactive Cytoscape graph, Mermaid call-sequence diagrams, and Monaco-rendered code stubs.
+4. **`IngestionCrew`**, one CrewAI `Crew`, runs automatically on every submitted repo: the Cartographer and the ORM Schema Agent map architecture and schema in parallel, a small model joins their reports, then the Anti-Pattern Agent scans the result.
+5. **Two more agents run later, only on demand**, never as part of ingestion: `ImpactCrew` traces blast radius for a proposed edit (whenever the user actually asks), and a standalone Feature Architect agent drafts a feature stub matching the codebase's own conventions.
+6. **The frontend** shows it all: live agent progress over SSE, the four analysis reports, an interactive Cytoscape graph, Mermaid call-sequence diagrams, and Monaco-rendered code stubs.
 
 ---
 
@@ -58,30 +59,20 @@ flowchart TD
     N2A --> NEO[("Neo4j")]:::data
     N2B --> QD[("Qdrant")]:::data
 
-    N2 --> FLOW
+    N2 --> CREW
 
-    subgraph FLOW["INGESTION FLOW · CrewAI"]
+    subgraph CREW["IngestionCrew · CrewAI Crew (Process.sequential) — always runs, always these 4 tasks"]
       direction TB
-
-      subgraph SC1["Sub-Crew 1 — Cartography"]
-        direction LR
-        AG1["Agent:<br/>Codebase Cartographer"]:::agent
-        AG2["Agent:<br/>Data & ORM Schema Agent"]:::agent
-        JN["join_reports_task<br/>(sync point — no analysis)"]:::agent
-        AG1 --> JN
-        AG2 --> JN
-      end
-
-      subgraph SC2["Sub-Crew 2 — Impact & Risk"]
-        direction LR
-        AG3["Agent:<br/>Impact Analysis &<br/>Blast Radius Agent"]:::agent
-        AG4["Agent:<br/>Architectural<br/>Anti-Pattern Agent"]:::agent
-      end
-
-      SC1 --> SC2
+      AG1["Agent: Codebase Cartographer<br/>map_architecture_task (async)"]:::agent
+      AG2["Agent: Data & ORM Schema Agent<br/>extract_schema_task (async)"]:::agent
+      JN["Agent: report_joiner (8B model)<br/>join_reports_task — no analysis,<br/>closes out the async pair"]:::agent
+      AG4["Agent: Architectural Anti-Pattern Agent<br/>anti_pattern_task"]:::agent
+      AG1 --> JN
+      AG2 --> JN
+      JN --> AG4
     end
 
-    FLOW --> PG[("Postgres<br/>jobs + reports")]:::data
+    CREW --> PG[("Postgres<br/>jobs + reports")]:::data
 
     PG --> N3
 
@@ -93,12 +84,21 @@ flowchart TD
 
     N3 --> UI["Next.js Frontend<br/>live logs · reports · graph · diagrams"]:::io
 
-    UI -.->|"on demand, user-triggered"| SC3
+    UI -.->|"on demand, user-triggered, any time after ingestion"| SC2
+    UI -.->|"on demand, user-triggered, any time after ingestion"| SC3
 
-    subgraph SC3["Feature Agent · NOT part of the Flow"]
+    subgraph SC2["ImpactCrew · a second, separate Crew"]
+      direction LR
+      AG3["Agent: Impact Analysis &<br/>Blast Radius Agent"]:::agent
+      AG3B["Agent: Architectural<br/>Anti-Pattern Agent"]:::agent
+      AG3 --> AG3B
+    end
+
+    subgraph SC3["Feature Agent · plain Agent+Task, no Crew"]
       AG5["Agent:<br/>Feature Architect &<br/>Contract Agent"]:::agent
     end
 
+    SC2 -.-> PG
     SC3 -.-> STUB["Monaco-rendered code stub"]:::io
 
     classDef mech fill:#eaedf2,stroke:#5b6b82,color:#1a1f2b,stroke-width:1.4px
@@ -109,13 +109,12 @@ flowchart TD
     style N1 fill:none,stroke:#5b6b82,stroke-width:1.2px
     style N2 fill:none,stroke:#5b6b82,stroke-width:1.2px
     style N3 fill:none,stroke:#5b6b82,stroke-width:1.2px
-    style FLOW fill:none,stroke:#6e56cf,stroke-width:1.6px
-    style SC1 fill:none,stroke:#6e56cf,stroke-width:1.2px,stroke-dasharray:3 3
+    style CREW fill:none,stroke:#6e56cf,stroke-width:1.6px
     style SC2 fill:none,stroke:#6e56cf,stroke-width:1.2px,stroke-dasharray:3 3
     style SC3 fill:none,stroke:#6e56cf,stroke-width:1.2px,stroke-dasharray:4 4
 ```
 
-**Reading the diagram:** solid arrows are the automatic sequence — every submitted repo runs Node 1 → Node 2 → Sub-Crew 1 → Sub-Crew 2 without stopping. The dashed path around the Feature Agent is separate: a user has to explicitly ask for a feature, at any point after ingestion, or never. Redis isn't drawn as a pipeline stage because it isn't one — it's the Celery broker and the backing store for live progress events, sitting underneath the whole flow rather than inside it.
+**Reading the diagram:** solid arrows are the automatic sequence — every submitted repo runs Node 1 → Node 2 → `IngestionCrew` without stopping, and without any conditional branch (`IngestionCrew` is always the same 4 tasks; there's no ingestion-time proposed-edit path). The dashed paths around `ImpactCrew` and the Feature Agent are both separate, user-triggered actions that can happen any time after ingestion, or never — `ImpactCrew` is a second, distinct `Crew` object (its own two agents) rather than a re-run of `IngestionCrew`, since it starts cold and has to read the earlier reports back out of Postgres instead of getting them via CrewAI's in-crew context passing. Redis isn't drawn as a pipeline stage because it isn't one — it's the Celery broker and the backing store for live progress events, sitting underneath the whole thing rather than inside it.
 
 ---
 
@@ -142,16 +141,23 @@ Pure mechanical translation, no LLM involved:
 - **`graph_sync.py`** — one Cypher `MERGE` per fact. `File`/`Class`/`Function`/`Field` become nodes; `DEFINES`/`CALLS`/`MUTATES`/`RELATES_TO`/`IMPORTS`/`CALLS_EXTERNAL`/`USES_EXTERNAL_SERVICE` become edges. Every node is namespaced by `repo_name` so multiple repos can share one Neo4j instance without collisions.
 - **`vector_sync.py`** — since there's no raw source text to embed (only structural metadata), each function/class gets a short synthesized description ("Function `charge_card` in `billing.py`. Calls: `stripe.Client`. Uses external service: stripe.") which is what actually gets embedded via **fastembed** (ONNX-based, no PyTorch/CUDA dependency) and stored in **Qdrant**.
 
-### The CrewAI Ingestion Flow (`src/codegrapher/flows/ingestion_flow.py`)
+### IngestionCrew (`src/codegrapher/crews/ingestion_crew/`)
 
-A real CrewAI `Flow` (`@start`/`@listen`), not hand-rolled orchestration:
+One CrewAI `Crew`, `Process.sequential`, always the same four tasks — no Flow, no conditional branches:
 
-- **`run_cartography`** kicks off **Sub-Crew 1**, whose two agents (Cartographer, ORM Schema Agent) run **in parallel** — they're independent, so there's no reason to serialize them. A third task, `join_reports_task`, exists purely to satisfy CrewAI's rule that a crew can end with at most one trailing async task; it does no analysis of its own, only reproduces both reports verbatim.
-- **`@listen(run_cartography)`** triggers **Sub-Crew 2** automatically once Sub-Crew 1 finishes — genuinely sequential, since Impact Analysis needs the architecture/schema reports as input.
+- **Cartographer** (`map_architecture_task`) and **ORM Schema Agent** (`extract_schema_task`) both have `async_execution: true` and run **in parallel** — they're independent, so there's no reason to serialize them.
+- **`report_joiner`** (`join_reports_task`, running on the small `llama-3.1-8b-instant` model) exists purely to satisfy CrewAI's rule that a sequential crew can end with at most one trailing async task; it does no analysis of its own, only reproduces both reports verbatim.
+- **Anti-Pattern Agent** (`anti_pattern_task`) runs last, reading the architecture and schema reports through CrewAI's own automatic sequential context-passing — every task in a sequential crew implicitly receives every earlier task's output, so nothing here is threaded manually between agents in Python.
+
+This crew was originally a two-sub-crew `Flow`, then briefly grew a fifth, conditional Impact Analysis task for a proposed-edit-at-ingestion-time path the real app never actually exercises (the `/repos` endpoint never accepts a proposed edit). Both were simplified away once neither was solving a real problem — see [Design notes](#design-notes-worth-knowing).
+
+### ImpactCrew (`src/codegrapher/crews/impact_crew/`)
+
+A second, separate `Crew` — **not** a re-run of `IngestionCrew`. Triggered on demand by `POST /repos/{job_id}/impact`, any time after ingestion (or never). Its two agents, **Impact Analysis & Blast Radius Agent** and **Architectural Anti-Pattern Agent**, run sequentially and are fed `architecture_report`/`schema_report` as explicit template inputs pulled back out of Postgres — this crew starts cold, with no in-memory context from the original ingestion run, so it can't rely on CrewAI's automatic context-passing the way `IngestionCrew`'s tasks can.
 
 ### Feature Agent (`src/codegrapher/crews/feature_agent/`)
 
-Deliberately **not** part of the Flow. One agent has nothing to coordinate with, so it's a plain `Agent` + `Task` call, not a `Crew` — and it's triggered on demand (`request_feature()`), whenever a user actually asks for something, independent of when ingestion happened.
+Deliberately **not** a `Crew` at all. One agent has nothing to coordinate with, so it's a plain `Agent` + `Task` call — and it's triggered on demand (`request_feature()`), whenever a user actually asks for something, independent of when ingestion happened.
 
 ### Node 3 — Graph Query API (`src/codegrapher/api/graph_query.py`, `sequence_diagram.py`)
 
@@ -175,7 +181,7 @@ Folded into the API layer rather than built as a standalone script, since its wh
 <tr><th>Layer</th><th>Technology</th><th>Why</th></tr>
 
 <tr><td rowspan="4"><strong>Agents & LLM</strong></td>
-<td><a href="https://github.com/crewAIInc/crewAI">CrewAI</a> (Flows, Crews, Agents)</td><td>Multi-agent orchestration — Sub-Crew 1, Sub-Crew 2, Feature Agent, and the ingestion Flow that chains them</td></tr>
+<td><a href="https://github.com/crewAIInc/crewAI">CrewAI</a> (Crews, Agents, Tasks)</td><td>Multi-agent orchestration — IngestionCrew (always-on), ImpactCrew and the Feature Agent (both on-demand)</td></tr>
 <tr><td>Groq (Llama 3.3 70B) via LiteLLM</td><td>Fast inference for every agent — CrewAI 1.x talks to it through its native LiteLLM path, no LangChain</td></tr>
 <tr><td>Custom <code>GroqLLM</code> wrapper (<code>llms.py</code>)</td><td>Strips a CrewAI/LiteLLM prompt-cache flag Groq rejects; retries short rate limits, fails fast on long ones instead of hanging a worker</td></tr>
 <tr><td>Framework profile registry (<code>frameworks.py</code>)</td><td>Pluggable ORM-convention detection (SQLAlchemy, Django) instead of one hardcoded set</td></tr>
@@ -231,18 +237,19 @@ repo-graph-builder/
 │   │   └── vector_sync.py       # Node 2 — Qdrant (fastembed)
 │   │
 │   ├── crews/
-│   │   ├── cartography_crew/    # Sub-Crew 1: Cartographer + ORM Schema Agent
-│   │   ├── impact_crew/         # Sub-Crew 2: Impact Analysis + Anti-Pattern Agent
+│   │   ├── ingestion_crew/      # Always-on Crew: Cartographer + ORM Schema Agent
+│   │   │                        # (parallel) -> report_joiner -> Anti-Pattern Agent
+│   │   ├── impact_crew/         # On-demand Crew: Impact Analysis + Anti-Pattern Agent
 │   │   └── feature_agent/       # On-demand Feature Architect (no Crew wrapper)
 │   │
-│   ├── flows/
-│   │   └── ingestion_flow.py    # CrewAI Flow chaining Sub-Crew 1 -> Sub-Crew 2
+│   ├── ingestion_state.py       # IngestionState — plain data container passed to
+│   │                            # the Feature Agent, populated from Postgres
 │   │
 │   ├── llms.py                  # GroqLLM wrapper (cache-flag fix, rate-limit retry)
 │   │
 │   ├── api/
 │   │   ├── server.py            # FastAPI app — all HTTP/SSE endpoints
-│   │   ├── tasks.py             # Celery ingestion task
+│   │   ├── tasks.py             # Celery tasks: run_ingestion, run_impact_analysis
 │   │   ├── models.py            # IngestionJob (Postgres)
 │   │   ├── graph_query.py       # Node 3 — Cytoscape JSON
 │   │   ├── sequence_diagram.py  # Node 3 — Mermaid diagrams
@@ -316,11 +323,12 @@ docker compose up -d --build
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/repos` | Submit a repo (`repo_path`: git URL or local path, optional `proposed_edit`) — returns a `job_id`, kicks off async ingestion |
+| `POST` | `/repos` | Submit a repo (`repo_path`: git URL or local path) — returns a `job_id`, kicks off `IngestionCrew` asynchronously |
 | `GET` | `/repos/{job_id}` | Poll job status (`pending`/`running`/`done`/`failed`) and the four reports once done |
 | `GET` | `/repos/{job_id}/events` | SSE stream of live ingestion progress |
 | `GET` | `/repos/{job_id}/graph` | Cytoscape.js-shaped JSON of the synced graph |
 | `GET` | `/repos/{job_id}/sequence/{function_name}` | Mermaid sequence diagram for one function's call chain |
+| `POST` | `/repos/{job_id}/impact` | On-demand impact analysis (`proposed_edit`: plain-language description) — runs `ImpactCrew` against the already-ingested repo's saved reports |
 | `POST` | `/repos/{job_id}/feature` | On-demand feature stub generation (`feature_request`: plain-language description) |
 
 ---
@@ -341,6 +349,9 @@ Being upfront about scope boundaries is part of the design, not an afterthought:
 
 - **Why Celery runs with `--pool=solo`:** the default prefork pool forks worker processes *after* SQLAlchemy's async engine is created, and forked children end up sharing a corrupted asyncpg connection. Fixed with `NullPool` (no connection reuse across event loops) *and* `--pool=solo` (no forking at all) — both were needed; each alone still failed under real testing.
 - **Why `join_reports_task` exists:** Cartographer and the ORM Schema Agent are independent, so they run in parallel (`async_execution: true`). CrewAI requires a crew to end with at most one trailing async task, so a third task exists purely as the synchronization point — it does no analysis, it only reproduces both reports verbatim.
+- **Why there's no `Flow` anymore:** the pipeline originally chained two separate `Crew`s (Cartography, Impact) with a CrewAI `Flow`. Once every downstream task's job was just "read the previous tasks' outputs," CrewAI's own automatic sequential context-passing did that for free — the `Flow` wasn't solving a coordination problem that was still there, so it was removed and the two crews merged into one `IngestionCrew`.
+- **Why Impact Analysis isn't in `IngestionCrew`:** it was, briefly, as a 5th task added only when a `proposed_edit` was supplied at submit time. But the real `/repos` endpoint never accepts one — only the separate `/repos/{job_id}/impact` endpoint does, later, on demand. Keeping a conditional branch for an input that can never arrive was complexity with no payoff, so it was pulled out entirely; `ImpactCrew` is now the only place impact analysis ever runs.
+- **Why `ImpactCrew` is a separate `Crew`, not a re-run of `IngestionCrew`:** `IngestionCrew`'s later tasks get the architecture/schema reports "for free" via CrewAI's context-passing, because they run in the same crew execution as the agents that produced them. `ImpactCrew` starts cold, possibly days later, with no such context available — so it takes `architecture_report`/`schema_report` as explicit inputs, read back out of Postgres. Same underlying reports, two different plumbing mechanisms, because the two crews start from different circumstances.
 - **Why the Feature Agent isn't a `Crew`:** a `Crew` coordinates *multiple* agents through a process. With one agent, there's nothing to coordinate — wrapping it would be indirection with no behavior behind it.
 - **Why repo_name derivation is centralized (`repo_source.py`):** Neo4j/Qdrant namespace everything by `repo_name`, derived from the directory's basename. A cloned git repo lands in a randomly-named temp directory unless the clone step explicitly names it after the repo — so `derive_repo_name()` is the single source of truth both the sync step and the later graph-lookup step call, keeping them from drifting apart.
 

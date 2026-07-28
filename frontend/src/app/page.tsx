@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
+import type { Core } from "cytoscape";
 
 const CytoscapeComponent = dynamic(() => import("react-cytoscapejs"), { ssr: false });
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
@@ -10,30 +11,29 @@ const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false 
 // (the actual stub) followed by prose (contract notes). Split them so the
 // code renders in Monaco - with real syntax highlighting - instead of a
 // flat <pre> block, and the prose stays as plain text underneath.
-function splitFeatureStub(markdown: string): { code: string | null; rest: string } {
-  const match = markdown.match(/```(?:python)?\n([\s\S]*?)```/);
-  if (!match) return { code: null, rest: markdown };
-  return { code: match[1].trimEnd(), rest: markdown.slice(match.index! + match[0].length).trim() };
+function splitFeatureStub(markdown: string): { code: string | null; language: string; rest: string } {
+  const match = markdown.match(/```([\w+-]*)\n([\s\S]*?)```/);
+  if (!match) return { code: null, language: "plaintext", rest: markdown };
+  return { code: match[2].trimEnd(), language: match[1] || "plaintext", rest: markdown.slice(match.index! + match[0].length).trim() };
 }
 
 function MermaidDiagram({ chart }: { chart: string }) {
   const [svg, setSvg] = useState<string | null>(null);
-  const idRef = useRef(`mermaid-${Math.random().toString(36).slice(2)}`);
+  const id = `mermaid-${useId().replace(/:/g, "")}`;
 
   useEffect(() => {
     let cancelled = false;
     import("mermaid").then(async ({ default: mermaid }) => {
       mermaid.initialize({ startOnLoad: false, theme: "neutral" });
-      const { svg } = await mermaid.render(idRef.current, chart);
+      const { svg } = await mermaid.render(id, chart);
       if (!cancelled) setSvg(svg);
     });
     return () => {
       cancelled = true;
     };
-  }, [chart]);
+  }, [chart, id]);
 
   if (!svg) return <p className="text-sm text-ink-muted">Rendering diagram…</p>;
-  // eslint-disable-next-line react/no-danger
   return <div dangerouslySetInnerHTML={{ __html: svg }} />;
 }
 
@@ -50,9 +50,10 @@ type JobStatus = {
   anti_pattern_report: string | null;
 };
 
+type GraphNode = { data: { id: string; label: string; name: string } };
 type CytoscapeElements = {
   elements: {
-    nodes: { data: { id: string; label: string; name: string } }[];
+    nodes: GraphNode[];
     edges: { data: { id: string; source: string; target: string; label: string } }[];
   };
 };
@@ -137,7 +138,7 @@ function StatusPill({ status }: { status: JobStatus["status"] }) {
 
 function Card({ title, icon, children }: { title: string; icon?: string; children: React.ReactNode }) {
   return (
-    <section className="flex flex-col gap-4 rounded-xl border border-border bg-surface p-6 shadow-sm">
+    <section className="flex flex-col gap-4 rounded-2xl border border-border bg-surface p-5 shadow-sm sm:p-6">
       <h2 className="flex items-center gap-2 text-[15px] font-semibold text-ink">
         {icon && <span aria-hidden="true">{icon}</span>}
         {title}
@@ -158,11 +159,18 @@ export default function Home() {
   const [featureRequest, setFeatureRequest] = useState("");
   const [featureStub, setFeatureStub] = useState<string | null>(null);
   const [featureLoading, setFeatureLoading] = useState(false);
+  const [featureError, setFeatureError] = useState<string | null>(null);
+  const [impactLoading, setImpactLoading] = useState(false);
+  const [impactError, setImpactError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [selectedFunction, setSelectedFunction] = useState("");
   const [sequenceDiagram, setSequenceDiagram] = useState<string | null>(null);
   const [sequenceLoading, setSequenceLoading] = useState(false);
   const [logs, setLogs] = useState<{ message: string; ts: string }[]>([]);
+  const [nodeType, setNodeType] = useState("All");
+  const [graphSearch, setGraphSearch] = useState("");
+  const [selectedNode, setSelectedNode] = useState<GraphNode["data"] | null>(null);
+  const graphRef = useRef<Core | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const logsEndRef = useRef<HTMLDivElement | null>(null);
@@ -197,15 +205,14 @@ export default function Home() {
     setFeatureStub(null);
     setSequenceDiagram(null);
     setLogs([]);
+    setSelectedNode(null);
+    setImpactError(null);
 
     try {
       const res = await fetch(`${API_URL}/repos`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          repo_path: repoPath,
-          ...(proposedEdit ? { proposed_edit: proposedEdit } : {}),
-        }),
+        body: JSON.stringify({ repo_path: repoPath }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -266,34 +273,96 @@ export default function Home() {
     if (!job) return;
     setFeatureLoading(true);
     setFeatureStub(null);
+    setFeatureError(null);
     try {
       const res = await fetch(`${API_URL}/repos/${job.job_id}/feature`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ feature_request: featureRequest }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail ?? `Feature request failed (${res.status})`);
       setFeatureStub(data.feature_stub ?? data.detail ?? "No response");
+    } catch (err) {
+      setFeatureError(err instanceof Error ? err.message : String(err));
     } finally {
       setFeatureLoading(false);
     }
   }
 
+  async function submitImpactAnalysis() {
+    if (!job || !proposedEdit.trim()) return;
+    setImpactLoading(true);
+    setImpactError(null);
+    try {
+      const res = await fetch(`${API_URL}/repos/${job.job_id}/impact`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ proposed_edit: proposedEdit }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail ?? "Could not start impact analysis");
+      }
+      for (let attempt = 0; attempt < 160; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        const latest = await fetch(`${API_URL}/repos/${job.job_id}`).then((response) => response.json() as Promise<JobStatus>);
+        setJob(latest);
+        if (latest.impact_report) return;
+        if (latest.error) throw new Error(latest.error);
+      }
+      throw new Error("Impact analysis is taking longer than expected. Please try again shortly.");
+    } catch (err) {
+      setImpactError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImpactLoading(false);
+    }
+  }
+
   const busy = job?.status === "pending" || job?.status === "running";
 
-  const cyElements = graph
-    ? [
-        ...graph.elements.nodes.map((n) => ({
-          data: { ...n.data, color: NODE_COLORS[n.data.label] ?? "#8892a6" },
-        })),
-        ...graph.elements.edges,
-      ]
-    : [];
+  const filteredGraph = useMemo(() => {
+    if (!graph) return { nodes: [], edges: [] };
+    const query = graphSearch.trim().toLowerCase();
+    const nodes = graph.elements.nodes.filter(
+      (node) =>
+        (nodeType === "All" || node.data.label === nodeType) &&
+        (!query || node.data.name.toLowerCase().includes(query)),
+    );
+    const visibleIds = new Set(nodes.map((node) => node.data.id));
+    return {
+      nodes,
+      edges: graph.elements.edges.filter((edge) => visibleIds.has(edge.data.source) && visibleIds.has(edge.data.target)),
+    };
+  }, [graph, graphSearch, nodeType]);
+
+  const cyElements = [
+    ...filteredGraph.nodes.map((n) => ({ data: { ...n.data, color: NODE_COLORS[n.data.label] ?? "#8892a6" } })),
+    ...filteredGraph.edges,
+  ];
+
+  function focusNode() {
+    const cy = graphRef.current;
+    if (!cy || !selectedNode) return;
+    const node = cy.getElementById(selectedNode.id);
+    cy.elements().removeClass("is-focus is-neighbor");
+    node.addClass("is-focus");
+    node.neighborhood().addClass("is-neighbor");
+    cy.animate({ fit: { eles: node.closedNeighborhood(), padding: 80 }, duration: 350 });
+  }
+
+  function resetGraphView() {
+    const cy = graphRef.current;
+    if (!cy) return;
+    cy.elements().removeClass("is-focus is-neighbor");
+    cy.fit(undefined, 52);
+  }
 
   return (
     <div className="min-h-screen bg-bg text-ink">
-      <main className="mx-auto flex max-w-5xl flex-col gap-6 px-6 py-12">
-        <header className="flex flex-col gap-1.5">
+      <main className="mx-auto flex max-w-7xl flex-col gap-6 px-4 py-7 sm:px-6 sm:py-10">
+        <header className="flex flex-col gap-3 rounded-2xl border border-border bg-surface px-5 py-5 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:px-7">
+          <div className="flex flex-col gap-1.5">
           <div className="flex items-center gap-2.5">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent text-accent-ink">
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -305,26 +374,19 @@ export default function Home() {
             </div>
             <h1 className="text-xl font-semibold tracking-tight">CodeGrapher</h1>
           </div>
-          <p className="text-sm text-ink-muted">Turn any repository into a queryable knowledge graph.</p>
+          <p className="text-sm text-ink-muted">Explore a repository’s architecture, risk, and code relationships.</p>
+          </div>
+          <span className="w-fit rounded-full bg-accent-soft px-3 py-1.5 text-xs font-semibold text-accent">Repository intelligence</span>
         </header>
 
         <Card title="Submit a repo" icon="📦">
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid gap-4">
             <Field label="Repository">
               <input
                 className={inputClass}
                 placeholder="Git URL or an absolute local path"
                 value={repoPath}
                 onChange={(e) => setRepoPath(e.target.value)}
-                disabled={submitting || busy}
-              />
-            </Field>
-            <Field label="Proposed edit (optional)">
-              <input
-                className={inputClass}
-                placeholder="What change should Impact Analysis evaluate?"
-                value={proposedEdit}
-                onChange={(e) => setProposedEdit(e.target.value)}
                 disabled={submitting || busy}
               />
             </Field>
@@ -370,14 +432,42 @@ export default function Home() {
 
         {job?.status === "done" && (
           <>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <section className="flex flex-col gap-2">
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-accent">Analysis overview</p>
+              <h2 className="text-2xl font-semibold tracking-tight">Understand the system before you change it.</h2>
+              <p className="max-w-2xl text-sm leading-relaxed text-ink-muted">Key findings are organized into focused briefs. Open only the detail you need, then use the interactive map to trace the code behind it.</p>
+            </section>
+            <Card title="Assess a proposed change" icon="💥">
+              <p className="-mt-1 text-sm leading-relaxed text-ink-muted">The repository is ready. Describe the change you’re considering and we’ll trace its downstream impact.</p>
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <input className={`${inputClass} flex-1`} placeholder="e.g. Change how handle.py routes a user message" value={proposedEdit} onChange={(e) => setProposedEdit(e.target.value)} disabled={impactLoading} />
+                <Button onClick={submitImpactAnalysis} disabled={!proposedEdit.trim() || impactLoading} loading={impactLoading}>{impactLoading ? "Tracing impact…" : "Run impact analysis"}</Button>
+              </div>
+              {impactError && <p className="rounded-lg bg-danger-soft px-3 py-2 text-sm text-danger">{impactError}</p>}
+              {job.impact_report && <ReportCard title="Latest blast radius" icon="💥" text={job.impact_report} />}
+            </Card>
+
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
               <ReportCard title="Architecture" icon="🗺️" text={job.architecture_report} />
               <ReportCard title="Schema" icon="🗄️" text={job.schema_report} />
-              <ReportCard title="Impact / Blast Radius" icon="💥" text={job.impact_report} />
               <ReportCard title="Anti-Patterns" icon="⚠️" text={job.anti_pattern_report} />
             </div>
 
-            <Card title={`Graph — ${graph?.elements.nodes.length ?? 0} nodes`} icon="🕸️">
+            <Card title="Repository map" icon="🕸️">
+              <div className="flex flex-col justify-between gap-3 border-b border-border pb-4 lg:flex-row lg:items-end">
+                <div>
+                  <p className="text-sm font-medium text-ink">{graph?.elements.nodes.length ?? 0} symbols, {graph?.elements.edges.length ?? 0} relationships</p>
+                  <p className="mt-1 text-xs text-ink-muted">Select a node to isolate its direct neighborhood and inspect its connections.</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <input className={`${inputClass} w-52 py-2`} value={graphSearch} onChange={(e) => setGraphSearch(e.target.value)} placeholder="Find a symbol…" />
+                  <select className={`${inputClass} py-2`} value={nodeType} onChange={(e) => setNodeType(e.target.value)}>
+                    <option value="All">All types</option>
+                    {Object.keys(NODE_COLORS).map((label) => <option key={label}>{label}</option>)}
+                  </select>
+                  <Button variant="secondary" onClick={resetGraphView}>Reset view</Button>
+                </div>
+              </div>
               <div className="flex flex-wrap gap-x-4 gap-y-1.5">
                 {Object.entries(NODE_COLORS).map(([label, color]) => (
                   <span key={label} className="flex items-center gap-1.5 text-xs text-ink-muted">
@@ -387,38 +477,59 @@ export default function Home() {
                 ))}
               </div>
               {graph && (
-                <div className="overflow-hidden rounded-lg border border-border">
+                <div className="grid overflow-hidden rounded-xl border border-border bg-[#0d1117] lg:grid-cols-[minmax(0,1fr)_260px]">
                   <CytoscapeComponent
                     elements={cyElements}
-                    style={{ width: "100%", height: "480px" }}
-                    layout={{ name: "cose", animate: false }}
+                    cy={(cy: Core) => { graphRef.current = cy; cy.on("tap", "node", (event) => { const data = event.target.data(); setSelectedNode(data); }); }}
+                    style={{ width: "100%", height: "780px" }}
+                    layout={{ name: "cose", animate: false, padding: 100, idealEdgeLength: 190, nodeRepulsion: 28000, gravity: 0.18, numIter: 2500 }}
                     stylesheet={[
                       {
                         selector: "node",
                         style: {
                           "background-color": "data(color)",
-                          label: "data(name)",
-                          "font-size": "8px",
-                          color: "#888",
+                          label: "",
+                          "font-size": "10px",
+                          color: "#cbd5e1",
                           "text-valign": "bottom",
-                          width: 16,
-                          height: 16,
+                          "text-margin-y": 7,
+                          "text-outline-color": "#0d1117",
+                          "text-outline-width": 2,
+                          width: 18,
+                          height: 18,
                         },
                       },
                       {
                         selector: "edge",
                         style: {
-                          width: 1,
-                          "line-color": "#c7cddb",
-                          "target-arrow-color": "#c7cddb",
+                          width: 1.15,
+                          opacity: 0.35,
+                          "line-color": "#718096",
+                          "target-arrow-color": "#718096",
                           "target-arrow-shape": "triangle",
                           "curve-style": "bezier",
                           label: "data(label)",
-                          "font-size": "6px",
+                          "font-size": "0px",
                         },
                       },
+                      { selector: "node.is-neighbor", style: { opacity: 1, label: "data(name)" } },
+                      { selector: "edge.is-neighbor", style: { opacity: 0.85, width: 2, "line-color": "#d4af37", "target-arrow-color": "#d4af37" } },
+                      { selector: "node.is-focus", style: { width: 28, height: 28, "border-width": 3, "border-color": "#f7d774", "font-size": "12px" } },
                     ]}
                   />
+                  <aside className="flex min-h-[220px] flex-col border-t border-white/10 bg-[#121822] p-5 text-slate-200 lg:border-l lg:border-t-0">
+                    {selectedNode ? <>
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Selected symbol</p>
+                      <span className="mt-3 w-fit rounded-full px-2 py-1 text-xs font-medium" style={{ backgroundColor: `${NODE_COLORS[selectedNode.label]}33`, color: NODE_COLORS[selectedNode.label] }}>{selectedNode.label}</span>
+                      <h3 className="mt-3 break-words text-base font-semibold text-white">{selectedNode.name}</h3>
+                      <p className="mt-2 break-all font-mono text-[11px] leading-relaxed text-slate-500">{selectedNode.id}</p>
+                      <div className="mt-auto pt-5"><Button variant="secondary" onClick={focusNode}>Focus connections</Button></div>
+                    </> : <>
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Explore the map</p>
+                      <h3 className="mt-3 text-base font-semibold text-white">Choose a symbol</h3>
+                      <p className="mt-2 text-sm leading-relaxed text-slate-400">Click any node to reveal its type and focus its direct relationships.</p>
+                    </>}
+                  </aside>
                 </div>
               )}
             </Card>
@@ -472,16 +583,17 @@ export default function Home() {
               >
                 {featureLoading ? "Generating…" : "Generate stub"}
               </Button>
+              {featureError && <p className="rounded-lg bg-danger-soft px-3 py-2 text-sm text-danger">{featureError}</p>}
               {featureStub &&
                 (() => {
-                  const { code, rest } = splitFeatureStub(featureStub);
+                  const { code, language, rest } = splitFeatureStub(featureStub);
                   return (
                     <div className="flex flex-col gap-3">
                       {code && (
                         <div className="overflow-hidden rounded-lg border border-border">
                           <MonacoEditor
                             height="320px"
-                            defaultLanguage="python"
+                            defaultLanguage={language === "ts" ? "typescript" : language}
                             value={code}
                             theme="vs-dark"
                             options={{ readOnly: true, minimap: { enabled: false }, fontSize: 13 }}
@@ -503,15 +615,28 @@ export default function Home() {
 }
 
 function ReportCard({ title, icon, text }: { title: string; icon: string; text: string | null }) {
+  const [expanded, setExpanded] = useState(false);
+  const lines = (text ?? "No findings were returned.").split("\n").filter(Boolean);
+  const preview = expanded ? lines : lines.slice(0, 7);
+
   return (
-    <div className="flex flex-col gap-2.5 rounded-xl border border-border bg-surface p-5 shadow-sm">
-      <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
-        <span aria-hidden="true">{icon}</span>
-        {title}
-      </h3>
-      <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed text-ink-muted">
-        {text}
-      </pre>
+    <div className="flex min-h-64 flex-col rounded-2xl border border-border bg-surface p-5 shadow-sm transition-shadow hover:shadow-md">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
+          <span aria-hidden="true">{icon}</span>{title}
+        </h3>
+        <span className="rounded-full bg-surface-2 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-ink-muted">Brief</span>
+      </div>
+      <div className="mt-4 flex flex-col gap-2.5 text-sm leading-6 text-ink-muted">
+        {preview.map((line, index) => {
+          const clean = line.replace(/^\*\s+/, "").replace(/^[-•]\s+/, "");
+          if (line.startsWith("## ")) return <h4 key={index} className="mt-1 text-base font-semibold text-ink">{line.slice(3)}</h4>;
+          if (line.startsWith("### ")) return <h5 key={index} className="mt-1 text-sm font-semibold text-ink">{line.slice(4)}</h5>;
+          if (/^\*\s+|^[-•]\s+/.test(line)) return <p key={index} className="border-l-2 border-accent/50 pl-3">{clean}</p>;
+          return <p key={index}>{line}</p>;
+        })}
+      </div>
+      {lines.length > 7 && <button onClick={() => setExpanded(!expanded)} className="mt-auto pt-4 text-left text-sm font-semibold text-accent hover:underline">{expanded ? "Show less" : `Read full brief (${lines.length} lines)`}</button>}
     </div>
   );
 }

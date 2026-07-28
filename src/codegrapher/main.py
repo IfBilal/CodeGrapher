@@ -7,7 +7,9 @@ from neo4j import GraphDatabase
 from qdrant_client import QdrantClient
 
 from codegrapher.crews.feature_agent.feature_agent import request_feature
-from codegrapher.flows.ingestion_flow import IngestionFlow
+from codegrapher.crews.impact_crew.impact_crew import ImpactCrew
+from codegrapher.crews.ingestion_crew.ingestion_crew import build_ingestion_crew
+from codegrapher.ingestion_state import IngestionState
 from codegrapher.parser.ast_parser import parse_repo
 from codegrapher.storage.graph_sync import sync_to_neo4j
 from codegrapher.storage.vector_sync import search, sync_to_qdrant
@@ -56,14 +58,33 @@ def run() -> None:
     for hit in search(query, qdrant_client, repo_name=parsed_repo["repo_name"]):
         print(f"  {hit['score']:.3f}  {hit['kind']:8s} {hit['name']:15s} ({hit['file_path']})")
 
-    print("\n\n===== INGESTION FLOW: CARTOGRAPHY -> IMPACT ANALYSIS =====\n")
-    ingestion_flow = IngestionFlow()
-    ingestion_flow.kickoff(inputs={"parsed_repo": parsed_repo_json, "proposed_edit": PROPOSED_EDIT})
-    ingestion_state = ingestion_flow.state
+    print("\n\n===== INGESTION CREW: CARTOGRAPHY -> ANTI-PATTERN =====\n")
+    crew = build_ingestion_crew()
+    result = crew.kickoff(inputs={"parsed_repo": parsed_repo_json})
+    outputs = result.tasks_output
+    ingestion_state = IngestionState(
+        parsed_repo=parsed_repo_json,
+        architecture_report=outputs[0].raw,
+        schema_report=outputs[1].raw,
+        anti_pattern_report=outputs[3].raw,
+    )
 
-    # This call is deliberately separate from the Flow above - in the real
-    # app it would happen much later, triggered by a user action in the
-    # frontend, against a repo that was ingested at some earlier time.
+    # Deliberately separate from IngestionCrew above, and from each other -
+    # in the real app both happen later, triggered by user actions against
+    # a repo that was ingested at some earlier time.
+    print("\n\n===== ON-DEMAND: IMPACT ANALYSIS =====\n")
+    impact_result = ImpactCrew().crew().kickoff(
+        inputs={
+            "parsed_repo": parsed_repo_json,
+            "proposed_edit": PROPOSED_EDIT,
+            "architecture_report": ingestion_state.architecture_report,
+            "schema_report": ingestion_state.schema_report,
+        }
+    )
+    ingestion_state.proposed_edit = PROPOSED_EDIT
+    ingestion_state.impact_report = impact_result.tasks_output[0].raw
+    ingestion_state.anti_pattern_report = impact_result.tasks_output[1].raw
+
     print("\n\n===== ON-DEMAND: FEATURE REQUEST =====\n")
     feature_result = request_feature(FEATURE_REQUEST, ingestion_state)
 
