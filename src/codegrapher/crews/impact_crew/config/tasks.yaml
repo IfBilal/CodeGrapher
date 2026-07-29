@@ -16,6 +16,16 @@ impact_analysis_task:
     If the proposed edit is empty or whitespace, do not infer or select an
     edit target. Return only a concise "## Blast Radius" section saying
     "No proposed edit was supplied, so no blast-radius assessment was run."
+
+    Otherwise, identify the specific function/class/file the edit names.
+    If that exact symbol does not appear anywhere in the parsed repository
+    data, do NOT substitute a different, real symbol and analyze that
+    instead - a confident-looking trace of the wrong target is worse than
+    no trace at all. Return only a concise "## Blast Radius" section
+    saying "Could not find `<name>` in the parsed repository data. No
+    blast-radius assessment was run." naming the exact symbol you looked
+    for and could not locate.
+
     Otherwise, starting from the edit target, trace outward up to 3 hops through
     imports, function calls, and mutates_models edges present in the
     parsed repository data. For each hop, list which files/functions/
@@ -32,7 +42,8 @@ impact_analysis_task:
     you are currently standing on does. If you cannot point to a concrete
     edge from the specific function at the current hop, do not include it.
   expected_output: >
-    If no edit was supplied, exactly the concise no-assessment message above.
+    If no edit was supplied, or the named edit target isn't found in the
+    parsed repository data, exactly the concise message for that case.
     Otherwise, a markdown report with a "## Blast Radius" section listing every
     impacted file/function/model, the hop count and edge chain that
     reaches it, and a HIGH/MEDIUM/LOW risk rating with one sentence of
