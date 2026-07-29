@@ -17,6 +17,7 @@ No part of the *extraction* is AI-guessed. Only the *reasoning* is.
 - [Project structure](#project-structure)
 - [Getting started](#getting-started)
 - [API reference](#api-reference)
+- [Accuracy testing — not just "does it run"](#accuracy-testing--not-just-does-it-run)
 - [Known limitations](#known-limitations-read-this)
 - [Design notes worth knowing](#design-notes-worth-knowing)
 
@@ -333,10 +334,25 @@ docker compose up -d --build
 
 ---
 
+## Accuracy testing — not just "does it run"
+
+A crew that runs without crashing and a crew that's *right* are different claims. Every agent below was tested against ground truth I verified independently (real GitHub repos, or synthetic repos built specifically to contain a known violation), not just exercised until it returned 200.
+
+**Reliable — verified correct across languages, frameworks, and adversarial cases:**
+- **Both parsers** (Python `ast`, JS/TS Tree-Sitter): every import/call/route/field checked against source, zero errors found.
+- **Cartographer / ORM Schema Agent**: correct across a Python+SQLAlchemy toy repo, a Django repo, a JS/Express repo, and one real 15-file production repo (architecture layers, all 5 routes, and the ORM-model-vs-Pydantic-schema distinction all verified against the actual GitHub source) — and it correctly *declines* to invent files it wasn't given data for, rather than guessing.
+- **Anti-Pattern Agent**: correctly caught real circular dependencies (including an indirect 3-file cycle), a real god object, and real tight coupling on synthetic repos built to contain them — and correctly reported "none found" on clean code, including the real repo above.
+- **Impact Analysis**: correctly distinguished a genuine high-impact edit (traced mutation + external dependency + FK relation) from a genuinely isolated no-impact edit (nothing calls the changed function) — and, after a fix, correctly holds call-graph boundaries instead of treating "same file" as "reachable," and correctly refuses to substitute a different real function when the requested edit target doesn't exist.
+
+**Not reliable — a real, demonstrated limitation, not a hedge:** the **Feature Agent** (code-stub generation) failed 4 out of roughly 6 adversarial test cases before each was individually patched: inventing an ungrounded status value, repurposing an existing field for an unrelated meaning, silently regenerating an already-existing endpoint as if it were new, and — worst — producing a stub that called a real function with the wrong argument shape (would raise `TypeError` if actually run), while using an ORM access pattern that isn't used anywhere else in the codebase. Each was caught and fixed with a more explicit prompt constraint, but the failure modes kept recurring on new axes rather than plateauing, which is the actual signal here: **this specific task (synthesizing new code that must stay correct against real signatures) is past what a 70B open model reliably does**, even though the exact same model handles the other four agents' extraction/citation tasks well. The other agents only have to report what's already in the facts; this one has to invent something new and get every detail of it right — a categorically harder bar, and the evidence bears that out. Treat feature-stub output as a rough draft that needs real review, not as trustworthy generated code.
+
+---
+
 ## Known limitations (read this)
 
 Being upfront about scope boundaries is part of the design, not an afterthought:
 
+- **The Feature Agent needs a stronger model to be production-reliable** — see [Accuracy testing](#accuracy-testing--not-just-does-it-run) above for the specific, demonstrated failure modes. This is the one component of the system that isn't there yet, and it's a model-capability ceiling, not a prompt-engineering gap.
 - **Heuristics can be wrong, on purpose transparently.** "Is this an ORM model?", "does this mutate the database?" are pattern-matches against common conventions, not certainties. Unresolved mutation calls are surfaced explicitly (`unresolved_mutation_calls`) instead of silently dropped.
 - **JS/TS parsing has no ORM/mutation detection.** Sequelize, Mongoose, Prisma, and TypeORM each have different-enough conventions that replicating the Python side's heuristics per-framework is a separate, larger piece of work — not built here.
 - **Same-file mutation tracing only goes one level deep**, and matches helper functions by name only (not fully-qualified) — a real limitation on codebases with naming collisions or deeper call chains.
@@ -354,6 +370,10 @@ Being upfront about scope boundaries is part of the design, not an afterthought:
 - **Why `ImpactCrew` is a separate `Crew`, not a re-run of `IngestionCrew`:** `IngestionCrew`'s later tasks get the architecture/schema reports "for free" via CrewAI's context-passing, because they run in the same crew execution as the agents that produced them. `ImpactCrew` starts cold, possibly days later, with no such context available — so it takes `architecture_report`/`schema_report` as explicit inputs, read back out of Postgres. Same underlying reports, two different plumbing mechanisms, because the two crews start from different circumstances.
 - **Why the Feature Agent isn't a `Crew`:** a `Crew` coordinates *multiple* agents through a process. With one agent, there's nothing to coordinate — wrapping it would be indirection with no behavior behind it.
 - **Why repo_name derivation is centralized (`repo_source.py`):** Neo4j/Qdrant namespace everything by `repo_name`, derived from the directory's basename. A cloned git repo lands in a randomly-named temp directory unless the clone step explicitly names it after the repo — so `derive_repo_name()` is the single source of truth both the sync step and the later graph-lookup step call, keeping them from drifting apart.
+- **Why `report_joiner` runs on the full model, not the 8B one:** the cheap model was tried first since verbatim transcription seemed like it needed no real reasoning. Live testing proved otherwise — it renamed sections/fields and fabricated an "Indexes" subsection neither source report ever stated. Switched to the same model as every other agent; a follow-up run confirmed both reports now come through as an exact verbatim substring of the joined output.
+- **Why Impact Analysis explicitly forbids "reached this file, so everything in it is reachable":** a synthetic 3-hop test showed the agent would sometimes pull in a sibling function in an already-reached file even with no real call edge to it, inflating blast radius with things that can't actually be affected. Fixed by requiring every hop to cite a concrete edge from the specific function just reached, not the file it lives in.
+- **Why Impact Analysis explicitly forbids substituting a different real symbol for a missing one:** asked to assess an edit to a function that doesn't exist anywhere in the repo, the agent used to quietly analyze a different, real function that happened to match the traced facts instead — producing a confident, detailed report for the wrong target, with the substitution buried in one sentence. A wrong-but-confident answer is worse than a refusal, so it now names the missing symbol and stops.
+- **Why the Feature Agent explicitly checks for existing functionality first:** asked for a feature that already existed almost verbatim in the repo (same route, same method, same function name — visible directly in its own input), it silently generated a near-duplicate with no mention that the functionality already existed. It now has to name the existing match and only proceed if there's a genuine, evidenced gap.
 
 ---
 
