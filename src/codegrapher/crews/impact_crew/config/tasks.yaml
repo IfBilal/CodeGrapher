@@ -23,6 +23,14 @@ impact_analysis_task:
     calls billing.charge_card"). Rank the full set of impacted components
     as HIGH / MEDIUM / LOW risk based on hop distance and whether the edge
     is a data mutation.
+
+    Follow only the specific calls/imports/mutates_models edges belonging
+    to the exact function you just reached at each hop - never include a
+    class or another function just because it happens to live in the same
+    file as something already reached. Reaching a file does not mean every
+    symbol in that file is reachable; only a real edge from the function
+    you are currently standing on does. If you cannot point to a concrete
+    edge from the specific function at the current hop, do not include it.
   expected_output: >
     If no edit was supplied, exactly the concise no-assessment message above.
     Otherwise, a markdown report with a "## Blast Radius" section listing every
