@@ -19,9 +19,13 @@ class IngestionCrew:
     a real problem, just adding structure for its own sake.
 
     join_reports_task exists purely to satisfy CrewAI's rule that a Crew
-    must end with at most one trailing async task - it runs on a small,
-    cheap model (report_joiner, llama-3.1-8b-instant) since transcribing
-    two already-finished reports verbatim needs no real reasoning.
+    must end with at most one trailing async task - it runs on the same
+    model as everything else (report_joiner). A cheap model was tried here
+    first (llama-3.1-8b-instant) on the theory that verbatim transcription
+    needs no real reasoning, but live testing showed it doesn't reliably
+    stay verbatim - it renamed sections/fields and fabricated an "Indexes"
+    subsection neither source report stated. Not worth the risk for a task
+    that's supposed to add zero information of its own.
 
     Impact analysis is deliberately not part of this crew - the real app
     never has a proposed edit at ingestion time, only later, as a separate
@@ -42,11 +46,7 @@ class IngestionCrew:
 
     @agent
     def report_joiner(self) -> Agent:
-        return Agent(
-            config=self.agents_config["report_joiner"],
-            llm=groq_llm(model="llama-3.1-8b-instant"),
-            verbose=True,
-        )
+        return Agent(config=self.agents_config["report_joiner"], llm=groq_llm(), verbose=True)
 
     @agent
     def anti_pattern_agent(self) -> Agent:
