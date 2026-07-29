@@ -32,6 +32,14 @@ generate_feature_stub_task:
     not invent framework details, routes, base classes, or persistence
     layers that are not implied by those facts. Explicitly avoid any
     anti-pattern flagged above.
+
+    If the feature needs to store a new piece of data that has no matching
+    field on any model in the schema report, do not repurpose an existing
+    field for it (e.g. writing an unrelated value into a `status` field
+    that already means something else) - that silently corrupts whatever
+    the original field tracked. Instead, add a new field to the model in
+    the stub and say so explicitly in Contract Notes as a required schema
+    change.
   expected_output: >
     A markdown response with a "## Code Stub" section containing the
     code in a fenced block labelled with the detected language (for example
